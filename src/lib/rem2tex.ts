@@ -3,6 +3,9 @@ import type { ReactRNPlugin, Rem } from '@remnote/plugin-sdk';
 const REQUIRED_PREAMBLE_NAME = 'Preamble';
 const REQUIRED_END_NAME = 'End';
 const HEADING_COMMANDS = ['section', 'subsection', 'subsubsection', 'paragraph', 'subparagraph'];
+type Rem2TexConversionContext = {
+  hierarchyRemIds: Set<string>;
+};
 
 function isFormattingMetadataLabel(value: string): boolean {
   const normalized = value.trim();
@@ -309,25 +312,172 @@ function escapeLatex(text: string): string {
 
 type FlattenOptions = {
   codeOnly?: boolean;
+  hierarchyRemIds?: Set<string>;
+  suppressExternalCitationWrap?: boolean;
 };
 
 function isCodeTextElement(entry: Record<string, unknown>): boolean {
   return entry.code === true || typeof entry.language === 'string';
 }
 
+function toLatexCitation(referenceText: string): string {
+  const trimmed = referenceText.trim();
+  if (!trimmed) return '';
+  if (isQueryLikeTitle(trimmed)) return '';
+  if (/^\\cite\{.+\}$/.test(trimmed)) return trimmed;
+
+  const citationKey = trimmed
+    .replace(/\s+/g, '')
+    .replace(/[^A-Za-z0-9:_-]/g, '');
+  if (!citationKey) return '';
+  return `\\cite{${citationKey}}`;
+}
+
+function normalizeAdjacentCitations(text: string): string {
+  if (!text.includes('\\cite{')) return text;
+
+  const citationPattern = /\\cite\{([^}]*)\}/g;
+  const matches: Array<{ start: number; end: number; keys: string[] }> = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = citationPattern.exec(text)) !== null) {
+    const keys = match[1]
+      .split(',')
+      .map((key) => key.trim())
+      .filter((key) => key.length > 0);
+    matches.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      keys,
+    });
+  }
+
+  if (matches.length < 2) return text;
+
+  let output = '';
+  let cursor = 0;
+  let i = 0;
+
+  while (i < matches.length) {
+    const groupStart = matches[i].start;
+    output += text.slice(cursor, groupStart);
+
+    const aggregatedKeys: string[] = [];
+    const seenKeys = new Set<string>();
+    let groupEnd = matches[i].end;
+
+    const addKeys = (keys: string[]) => {
+      for (const key of keys) {
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+          aggregatedKeys.push(key);
+        }
+      }
+    };
+
+    addKeys(matches[i].keys);
+
+    let j = i + 1;
+    while (j < matches.length) {
+      const between = text.slice(groupEnd, matches[j].start);
+      if (!/^\s*$/.test(between)) break;
+      addKeys(matches[j].keys);
+      groupEnd = matches[j].end;
+      j += 1;
+    }
+
+    output += `\\cite{${aggregatedKeys.join(', ')}}`;
+    output += text.slice(matches[i].end, groupEnd).replace(/[^\s]/g, '');
+    cursor = groupEnd;
+    i = j;
+  }
+
+  output += text.slice(cursor);
+  return output;
+}
+
+function isQueryLikeTitle(title: string): boolean {
+  const normalized = title.trim().toLowerCase();
+  if (normalized.startsWith('query:')) return true;
+  if (normalized.length > 120 && normalized.includes(' ')) return true;
+  return false;
+}
+
+async function getFirstDocumentAncestor(rem: Rem, plugin: ReactRNPlugin): Promise<Rem | undefined> {
+  let cursor: Rem | undefined = rem;
+  let fallbackDocument: Rem | undefined;
+  while (cursor) {
+    if (await cursor.isDocument()) {
+      const title = (await richTextToString(plugin, cursor.text)).trim();
+      if (!isQueryLikeTitle(title)) {
+        return cursor;
+      }
+      fallbackDocument = cursor;
+    }
+    cursor = await cursor.getParentRem();
+  }
+  return fallbackDocument;
+}
+
+function flattenRawTitleText(element: unknown, depth = 0): string {
+  if (depth > 8 || element === null || element === undefined) return '';
+  if (typeof element === 'string') return element;
+  if (Array.isArray(element)) return element.map((item) => flattenRawTitleText(item, depth + 1)).join('');
+  if (typeof element !== 'object') return '';
+
+  const entry = element as Record<string, unknown>;
+  if ((entry.i === 'm' || entry.i === undefined) && typeof entry.text === 'string') {
+    return entry.text;
+  }
+  return '';
+}
+
+async function getCitationKeyFromDocumentAncestor(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  options: FlattenOptions,
+  seenRemIds: Set<string>,
+  depth: number
+): Promise<string> {
+  const documentAncestor = (await getFirstDocumentAncestor(rem, plugin)) ?? rem;
+  const resolvedTitleText = (
+    await flattenRichTextElement(
+      plugin,
+      documentAncestor.text,
+      { ...options, suppressExternalCitationWrap: true },
+      new Set(seenRemIds),
+      depth + 1
+    )
+  ).trim();
+  if (resolvedTitleText && !isQueryLikeTitle(resolvedTitleText)) {
+    return resolvedTitleText;
+  }
+
+  const rawTitleText = flattenRawTitleText(documentAncestor.text).trim();
+  if (rawTitleText && !isQueryLikeTitle(rawTitleText)) {
+    return rawTitleText;
+  }
+
+  return `doc_${documentAncestor._id}`;
+}
+
 async function flattenRichTextElement(
   plugin: ReactRNPlugin,
   element: unknown,
-  options: FlattenOptions = {}
+  options: FlattenOptions = {},
+  seenRemIds: Set<string> = new Set(),
+  depth = 0
 ): Promise<string> {
+  if (depth > 12) return '';
   if (typeof element === 'string') return element;
   if (element === null || element === undefined) return '';
 
   if (Array.isArray(element)) {
-    const flattenedParts = await Promise.all(
-      element.map((child) => flattenRichTextElement(plugin, child, options))
-    );
-    return flattenedParts.join('');
+    let flattened = '';
+    for (const child of element) {
+      flattened += await flattenRichTextElement(plugin, child, options, seenRemIds, depth + 1);
+    }
+    return flattened;
   }
 
   if (typeof element !== 'object') return '';
@@ -340,13 +490,6 @@ async function flattenRichTextElement(
     return wrapRemnoteMath(entry.text, isDisplay);
   }
 
-  if (typeof entry.text === 'string') {
-    if (options.codeOnly && !isCodeTextElement(entry)) {
-      return '';
-    }
-    return entry.text;
-  }
-
   // Resolve Rem reference rich-text elements to their current visible page text.
   if (entry.i === 'q' && typeof entry._id === 'string') {
     // In code-only mode, rem references are usually formatting metadata
@@ -354,20 +497,60 @@ async function flattenRichTextElement(
     if (options.codeOnly) {
       return '';
     }
+    if (seenRemIds.has(entry._id)) {
+      return '';
+    }
     const linkedRem = await plugin.rem.findOne(entry._id);
     if (!linkedRem) {
       return '';
     }
-    const linkedText = (await flattenRichTextElement(plugin, linkedRem.text, options)).trim();
+    const nextSeen = new Set(seenRemIds);
+    nextSeen.add(entry._id);
+    const linkedText = (
+      await flattenRichTextElement(
+        plugin,
+        linkedRem.text,
+        { ...options, suppressExternalCitationWrap: true },
+        nextSeen,
+        depth + 1
+      )
+    ).trim();
     if (isFormattingMetadataLabel(linkedText)) {
       return '';
+    }
+
+    const isOutsideHierarchy =
+      options.hierarchyRemIds !== undefined && !options.hierarchyRemIds.has(entry._id);
+    if (isOutsideHierarchy && !options.suppressExternalCitationWrap) {
+      const documentCitationKey = await getCitationKeyFromDocumentAncestor(
+        plugin,
+        linkedRem,
+        options,
+        nextSeen,
+        depth
+      );
+      const citation = toLatexCitation(documentCitationKey) || toLatexCitation(linkedText);
+      return citation || `\\cite{rem_${entry._id}}`;
     }
     return linkedText;
   }
 
+  if (typeof entry.text === 'string') {
+    // Only serialize plain text nodes; skip non-text payload nodes that may
+    // carry query/search context blobs.
+    const isPlainTextNode = entry.i === 'm' || entry.i === undefined;
+    if (!isPlainTextNode) {
+      return '';
+    }
+    if (options.codeOnly && !isCodeTextElement(entry)) {
+      return '';
+    }
+    return entry.text;
+  }
+
   // Some rich text payloads nest fallback text for deleted/aliased Rem refs.
   if (entry.textOfDeletedRem !== undefined) {
-    return flattenRichTextElement(plugin, entry.textOfDeletedRem, options);
+    return flattenRichTextElement(plugin, entry.textOfDeletedRem, options, seenRemIds, depth + 1);
   }
 
   return '';
@@ -381,17 +564,31 @@ async function richTextToString(
   if (text === null || text === undefined) return '';
   const flattened = await flattenRichTextElement(plugin, text, options);
   const trimmed = flattened.trim();
+  if (/^query:/i.test(trimmed)) {
+    return '';
+  }
   if (isFormattingMetadataLabel(trimmed)) {
     return '';
   }
-  return trimmed;
+  return normalizeAdjacentCitations(trimmed);
 }
 
-async function getRemTitle(plugin: ReactRNPlugin, rem: Rem): Promise<string> {
-  return richTextToString(plugin, rem.text);
+async function getRemTitle(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  context?: Rem2TexConversionContext
+): Promise<string> {
+  return richTextToString(plugin, rem.text, {
+    hierarchyRemIds: context?.hierarchyRemIds,
+  });
 }
 
-async function getBoundaryBlock(plugin: ReactRNPlugin, boundaryRem: Rem, label: string): Promise<string> {
+async function getBoundaryBlock(
+  plugin: ReactRNPlugin,
+  boundaryRem: Rem,
+  label: string,
+  context: Rem2TexConversionContext
+): Promise<string> {
   const children = await boundaryRem.getChildrenRem();
   const codeLines: string[] = [];
   const plainLines: string[] = [];
@@ -405,7 +602,9 @@ async function getBoundaryBlock(plugin: ReactRNPlugin, boundaryRem: Rem, label: 
 
     // Fallback for users who place plain text rather than a code block.
     if (!codeLine && !codeBackLine) {
-      const fallbackLine = await richTextToString(plugin, rem.backText ?? rem.text);
+      const fallbackLine = await richTextToString(plugin, rem.backText ?? rem.text, {
+        hierarchyRemIds: context.hierarchyRemIds,
+      });
       if (fallbackLine) plainLines.push(fallbackLine);
     }
 
@@ -424,7 +623,10 @@ async function getBoundaryBlock(plugin: ReactRNPlugin, boundaryRem: Rem, label: 
       codeOnly: true,
     });
     const directText =
-      directCodeText || (await richTextToString(plugin, boundaryRem.backText ?? boundaryRem.text));
+      directCodeText ||
+      (await richTextToString(plugin, boundaryRem.backText ?? boundaryRem.text, {
+        hierarchyRemIds: context.hierarchyRemIds,
+      }));
     if (directText) {
       if (directCodeText) {
         codeLines.push(directText);
@@ -465,19 +667,24 @@ async function getFocusedParentRem(plugin: ReactRNPlugin): Promise<Rem> {
   return selectedRem;
 }
 
-async function todoComment(plugin: ReactRNPlugin, rem: Rem): Promise<string> {
+async function todoComment(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<string> {
   const status = await rem.getTodoStatus();
   const marker = status === 'Finished' ? '[X]' : '[ ]';
-  const text = await getRemTitle(plugin, rem);
+  const text = await getRemTitle(plugin, rem, context);
   return text ? `% TODO ${marker} ${text}` : `% TODO ${marker}`;
 }
 
 async function getRemBodyText(
   plugin: ReactRNPlugin,
-  rem: Rem
+  rem: Rem,
+  context: Rem2TexConversionContext
 ): Promise<{ text: string; fromCodeBlock: boolean }> {
   const codeText = await richTextToString(plugin, rem.text, { codeOnly: true });
-  const plainText = await getRemTitle(plugin, rem);
+  const plainText = await getRemTitle(plugin, rem, context);
 
   // Only treat content as raw code when the code-only extraction matches
   // the full text extraction (modulo known metadata label lines). This avoids
@@ -583,11 +790,12 @@ async function serializeNode(
   plugin: ReactRNPlugin,
   rem: Rem,
   currentHeadingLevel: number,
-  output: string[]
+  output: string[],
+  context: Rem2TexConversionContext
 ): Promise<void> {
   const isTodo = await rem.isTodo();
   if (isTodo) {
-    output.push(await todoComment(plugin, rem));
+    output.push(await todoComment(plugin, rem, context));
     return;
   }
 
@@ -595,7 +803,7 @@ async function serializeNode(
   if (hasImageToken) {
     const mediaBlocks = await getMediaCodeBlocksFromImmediateChildren(plugin, rem);
     if (mediaBlocks.length === 0) {
-      const remTitle = await getRemTitle(plugin, rem);
+      const remTitle = await getRemTitle(plugin, rem, context);
       const warningText = remTitle
         ? `Image rem "${remTitle}" must include at least one child code block containing \\begin{figure} or \\begin{table}.`
         : 'Image rem must include at least one child code block containing \\begin{figure} or \\begin{table}.';
@@ -610,7 +818,7 @@ async function serializeNode(
     return;
   }
 
-  const { text: title, fromCodeBlock } = await getRemBodyText(plugin, rem);
+  const { text: title, fromCodeBlock } = await getRemBodyText(plugin, rem, context);
   const headingStyle = await rem.getFontSize();
   const isHeading = headingStyle !== undefined;
 
@@ -624,7 +832,7 @@ async function serializeNode(
 
     const children = await rem.getChildrenRem();
     for (const child of children) {
-      await serializeNode(plugin, child, headingLevel, output);
+      await serializeNode(plugin, child, headingLevel, output, context);
     }
     return;
   }
@@ -637,7 +845,7 @@ async function serializeNode(
   const nonTodoChildren: Rem[] = [];
   for (const child of children) {
     if (await child.isTodo()) {
-      output.push(await todoComment(plugin, child));
+      output.push(await todoComment(plugin, child, context));
     } else {
       nonTodoChildren.push(child);
     }
@@ -648,7 +856,7 @@ async function serializeNode(
   }
 
   for (const child of nonTodoChildren) {
-    await serializeNode(plugin, child, currentHeadingLevel, output);
+    await serializeNode(plugin, child, currentHeadingLevel, output, context);
   }
 }
 
@@ -674,6 +882,10 @@ async function createOutputRem(plugin: ReactRNPlugin, parent: Rem, latex: string
 export async function runRem2TexConversion(plugin: ReactRNPlugin): Promise<string> {
   try {
     const parentRem = await getFocusedParentRem(plugin);
+    const descendants = await parentRem.getDescendants();
+    const context: Rem2TexConversionContext = {
+      hierarchyRemIds: new Set([parentRem._id, ...descendants.map((rem) => rem._id)]),
+    };
     const children = await parentRem.getChildrenRem();
 
     if (children.length < 2) {
@@ -681,14 +893,14 @@ export async function runRem2TexConversion(plugin: ReactRNPlugin): Promise<strin
     }
 
     const firstChild = children[0];
-    const firstName = await getRemTitle(plugin, firstChild);
+    const firstName = await getRemTitle(plugin, firstChild, context);
     if (firstName !== REQUIRED_PREAMBLE_NAME) {
       throw new Error(`First child must be "${REQUIRED_PREAMBLE_NAME}".`);
     }
 
     let endIndex = -1;
     for (let i = 1; i < children.length; i += 1) {
-      const childName = await getRemTitle(plugin, children[i]);
+      const childName = await getRemTitle(plugin, children[i], context);
       if (childName === REQUIRED_END_NAME) {
         endIndex = i;
         break;
@@ -698,14 +910,14 @@ export async function runRem2TexConversion(plugin: ReactRNPlugin): Promise<strin
       throw new Error(`Could not find "${REQUIRED_END_NAME}" after "${REQUIRED_PREAMBLE_NAME}".`);
     }
 
-    const preamble = await getBoundaryBlock(plugin, firstChild, REQUIRED_PREAMBLE_NAME);
+    const preamble = await getBoundaryBlock(plugin, firstChild, REQUIRED_PREAMBLE_NAME, context);
     const endRem = children[endIndex];
-    const endBlock = await getBoundaryBlock(plugin, endRem, REQUIRED_END_NAME);
+    const endBlock = await getBoundaryBlock(plugin, endRem, REQUIRED_END_NAME, context);
     const bodyRems = children.slice(1, endIndex);
 
     const bodyLines: string[] = [];
     for (const bodyRem of bodyRems) {
-      await serializeNode(plugin, bodyRem, 0, bodyLines);
+      await serializeNode(plugin, bodyRem, 0, bodyLines, context);
     }
     const body = bodyLines.join('\n').trim();
 

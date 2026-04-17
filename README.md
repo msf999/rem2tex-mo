@@ -27,6 +27,8 @@ The plugin registers:
 
 Run it while focused on the parent rem you want to export.
 
+During conversion, Rem2Tex emits step toasts (for example `Rem2Tex 2/6: ...`) to show progress.
+
 ## Required top-level paper structure
 
 Expected paper tree:
@@ -135,8 +137,23 @@ Inside math environments (`equation`, `align`, `gather`, `multline`, and starred
 
 For normal text extraction:
 
-- rem reference tokens are resolved to linked rem text
-- useful for citation keys stored as linked rems
+- rem reference tokens are context-aware
+- if a pin/reference points inside the current export hierarchy, it resolves as normal linked text
+- if a pin/reference points outside the current export hierarchy, it is converted to a citation key
+  derived from the first document ancestor and emitted as `\cite{...}`
+- query-like payload artifacts (e.g. segments beginning with `query:`) are suppressed and not emitted
+
+Adjacent citation normalization:
+
+- adjacent citations are merged: `\cite{one}\cite{two}` -> `\cite{one, two}`
+- whitespace-separated adjacent citations are merged similarly
+- duplicate adjacent keys are deduplicated:
+  - `\cite{one}\cite{one}\cite{two}` -> `\cite{one, two}`
+
+Citation key fallback behavior:
+
+- primary key source: first non-query-like document ancestor title
+- fallback: deterministic id-based key (`doc_<id>` / `rem_<id>`) if no clean title is available
 
 For code-only extraction:
 
