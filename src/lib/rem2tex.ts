@@ -23,9 +23,81 @@ function toDateStamp(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function escapeLatex(text: string): string {
+function isEscaped(text: string, index: number): boolean {
+  let backslashes = 0;
+  let cursor = index - 1;
+  while (cursor >= 0 && text[cursor] === '\\') {
+    backslashes += 1;
+    cursor -= 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function findMatchingGroup(text: string, start: number, open: string, close: string): number {
+  if (text[start] !== open) return -1;
+  let depth = 0;
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === open && !isEscaped(text, i)) {
+      depth += 1;
+    } else if (char === close && !isEscaped(text, i)) {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+function findInlineMathEnd(text: string, start: number, delimiter: '$' | '$$'): number {
+  let cursor = start + delimiter.length;
+  while (cursor < text.length) {
+    if (text.startsWith(delimiter, cursor) && !isEscaped(text, cursor)) {
+      return cursor + delimiter.length;
+    }
+    cursor += 1;
+  }
+  return -1;
+}
+
+function consumeLatexCommand(text: string, start: number): number {
+  if (text[start] !== '\\') return start;
+  const nextChar = text[start + 1];
+  if (!nextChar) return start + 1;
+
+  // Keep escaped literal symbols untouched (e.g., \%, \_, \\).
+  if (!/[A-Za-z]/.test(nextChar)) return start + 2;
+
+  let cursor = start + 1;
+  while (cursor < text.length && /[A-Za-z]/.test(text[cursor])) {
+    cursor += 1;
+  }
+  if (text[cursor] === '*') cursor += 1;
+
+  // Consume attached [] and {} argument groups.
+  while (cursor < text.length) {
+    while (cursor < text.length && /\s/.test(text[cursor])) {
+      cursor += 1;
+    }
+    if (text[cursor] === '[') {
+      const end = findMatchingGroup(text, cursor, '[', ']');
+      if (end === -1) break;
+      cursor = end;
+      continue;
+    }
+    if (text[cursor] === '{') {
+      const end = findMatchingGroup(text, cursor, '{', '}');
+      if (end === -1) break;
+      cursor = end;
+      continue;
+    }
+    break;
+  }
+
+  return cursor;
+}
+
+function escapePlainTextSegment(segment: string): string {
   const map: Record<string, string> = {
-    '\\': '\\textbackslash{}',
     '{': '\\{',
     '}': '\\}',
     '$': '\\$',
@@ -36,7 +108,70 @@ function escapeLatex(text: string): string {
     '~': '\\textasciitilde{}',
     '^': '\\textasciicircum{}',
   };
-  return text.replace(/[\\{}$&#%_~^]/g, (match) => map[match] ?? match);
+
+  let result = '';
+  for (let i = 0; i < segment.length; i += 1) {
+    const char = segment[i];
+    const next = segment[i + 1];
+
+    // Preserve already escaped literals in plain text.
+    if (char === '\\' && next && /[\\{}$&#%_~^]/.test(next)) {
+      result += `${char}${next}`;
+      i += 1;
+      continue;
+    }
+
+    if (char === '\\') {
+      result += '\\textbackslash{}';
+      continue;
+    }
+
+    result += map[char] ?? char;
+  }
+  return result;
+}
+
+function escapeLatex(text: string): string {
+  let result = '';
+  let cursor = 0;
+  let plainStart = 0;
+
+  const flushPlain = (end: number): void => {
+    if (end > plainStart) {
+      result += escapePlainTextSegment(text.slice(plainStart, end));
+    }
+  };
+
+  while (cursor < text.length) {
+    let protectedEnd = -1;
+
+    if (text.startsWith('\\[', cursor)) {
+      const end = text.indexOf('\\]', cursor + 2);
+      if (end !== -1) protectedEnd = end + 2;
+    } else if (text.startsWith('\\(', cursor)) {
+      const end = text.indexOf('\\)', cursor + 2);
+      if (end !== -1) protectedEnd = end + 2;
+    } else if (text.startsWith('$$', cursor) && !isEscaped(text, cursor)) {
+      protectedEnd = findInlineMathEnd(text, cursor, '$$');
+    } else if (text[cursor] === '$' && !isEscaped(text, cursor)) {
+      protectedEnd = findInlineMathEnd(text, cursor, '$');
+    } else if (text[cursor] === '\\') {
+      protectedEnd = consumeLatexCommand(text, cursor);
+    }
+
+    if (protectedEnd > cursor) {
+      flushPlain(cursor);
+      result += text.slice(cursor, protectedEnd);
+      cursor = protectedEnd;
+      plainStart = cursor;
+      continue;
+    }
+
+    cursor += 1;
+  }
+
+  flushPlain(text.length);
+  return result;
 }
 
 function flattenRichTextElement(element: unknown): string {
