@@ -1,0 +1,22 @@
+{
+  "manifestVersion": 1,
+  "id": "rem2tex",
+  "name": "Rem2Tex",
+  "author": "Mo9",
+  "repoUrl": "https://github.com/mo9/rem2tex",
+  "version": {
+    "major": 0,
+    "minor": 0,
+    "patch": 1
+  },
+  "theme": [],
+  "enableOnMobile": false,
+  "description": "Convert a structured RemNote Paper tree into a LaTeX code block export.",
+  "requestNative": false,
+  "requiredScopes": [
+    {
+      "type": "All",
+      "level": "ReadCreateModify"
+    }
+  ]
+}
