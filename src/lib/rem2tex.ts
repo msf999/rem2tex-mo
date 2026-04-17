@@ -4,6 +4,51 @@ const REQUIRED_PREAMBLE_NAME = 'Preamble';
 const REQUIRED_END_NAME = 'End';
 const HEADING_COMMANDS = ['section', 'subsection', 'subsubsection', 'paragraph', 'subparagraph'];
 
+function isFormattingMetadataLabel(value: string): boolean {
+  const normalized = value.trim();
+  if (normalized === 'Size' || /^H[1-6]$/.test(normalized)) return true;
+
+  // Common RemNote code block UI metadata keys that should never
+  // appear in exported TeX output.
+  return normalized === 'BoundHeight' || normalized === 'Language';
+}
+
+function isCodeMetadataArtifactLine(value: string): boolean {
+  const normalized = value.trim();
+  if (!normalized) return false;
+
+  if (isFormattingMetadataLabel(normalized)) return true;
+
+  const lower = normalized.toLowerCase();
+  // Common trailing artifacts seen in RemNote code rich-text payloads.
+  return lower === 'true' || lower === 'false' || lower === 'latex' || lower === 'language';
+}
+
+function stripTrailingCodeMetadataArtifacts(text: string): string {
+  const lines = text.split('\n');
+  while (lines.length > 0 && isCodeMetadataArtifactLine(lines[lines.length - 1])) {
+    lines.pop();
+  }
+  return lines.join('\n').trim();
+}
+
+function wrapRemnoteMath(text: string, preferDisplay = false): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+
+  // Preserve already-delimited math snippets.
+  if (
+    (trimmed.startsWith('$$') && trimmed.endsWith('$$')) ||
+    (trimmed.startsWith('$') && trimmed.endsWith('$')) ||
+    (trimmed.startsWith('\\(') && trimmed.endsWith('\\)')) ||
+    (trimmed.startsWith('\\[') && trimmed.endsWith('\\]'))
+  ) {
+    return trimmed;
+  }
+
+  return preferDisplay ? `$$${trimmed}$$` : `$${trimmed}$`;
+}
+
 export function normalizeUnknownError(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === 'string') return error;
@@ -59,6 +104,49 @@ function findInlineMathEnd(text: string, start: number, delimiter: '$' | '$$'): 
   return -1;
 }
 
+type LatexEnvironmentToken = {
+  kind: 'begin' | 'end';
+  name: string;
+  tokenEnd: number;
+};
+
+function parseLatexEnvironmentToken(text: string, start: number): LatexEnvironmentToken | undefined {
+  const match = text.slice(start).match(/^\\(begin|end)\s*\{\s*([^\}\s]+)\s*\}/);
+  if (!match) return undefined;
+  return {
+    kind: match[1] as 'begin' | 'end',
+    name: match[2],
+    tokenEnd: start + match[0].length,
+  };
+}
+
+function findLatexEnvironmentEnd(text: string, start: number): number {
+  const startToken = parseLatexEnvironmentToken(text, start);
+  if (!startToken || startToken.kind !== 'begin') return -1;
+
+  const envName = startToken.name;
+  let depth = 1;
+  let cursor = startToken.tokenEnd;
+
+  while (cursor < text.length) {
+    const nextSlash = text.indexOf('\\', cursor);
+    if (nextSlash === -1) break;
+
+    const token = parseLatexEnvironmentToken(text, nextSlash);
+    if (token && token.name === envName) {
+      if (token.kind === 'begin') depth += 1;
+      if (token.kind === 'end') depth -= 1;
+      if (depth === 0) return token.tokenEnd;
+      cursor = token.tokenEnd;
+      continue;
+    }
+
+    cursor = nextSlash + 1;
+  }
+
+  return -1;
+}
+
 function consumeLatexCommand(text: string, start: number): number {
   if (text[start] !== '\\') return start;
   const nextChar = text[start + 1];
@@ -105,7 +193,6 @@ function escapePlainTextSegment(segment: string): string {
     '#': '\\#',
     '%': '\\%',
     '_': '\\_',
-    '~': '\\textasciitilde{}',
     '^': '\\textasciicircum{}',
   };
 
@@ -115,7 +202,7 @@ function escapePlainTextSegment(segment: string): string {
     const next = segment[i + 1];
 
     // Preserve already escaped literals in plain text.
-    if (char === '\\' && next && /[\\{}$&#%_~^]/.test(next)) {
+    if (char === '\\' && next && /[\\{}$&#%_^]/.test(next)) {
       result += `${char}${next}`;
       i += 1;
       continue;
@@ -131,37 +218,83 @@ function escapePlainTextSegment(segment: string): string {
   return result;
 }
 
+function normalizeMathEnvironmentSpacing(text: string): string {
+  const mathEnvironments = new Set([
+    'equation',
+    'equation*',
+    'align',
+    'align*',
+    'gather',
+    'gather*',
+    'multline',
+    'multline*',
+  ]);
+
+  return text.replace(
+    /\\begin\{([A-Za-z*]+)\}([\s\S]*?)\\end\{\1\}/g,
+    (match: string, envName: string, body: string) => {
+      if (!mathEnvironments.has(envName)) return match;
+
+      let normalizedBody = body
+        // RemNote can introduce extra blank lines before labels in math envs.
+        .replace(/\n[ \t]*\n([ \t]*\\label\{)/g, '\n$1')
+        // Avoid runaway blank lines in math blocks.
+        .replace(/\n{3,}/g, '\n\n');
+
+      // If lines inside a math environment are individually wrapped with
+      // $...$ or $$...$$, unwrap them to avoid nested math delimiters.
+      normalizedBody = normalizedBody
+        .split('\n')
+        .map((line) => {
+          const inlineWrapped = line.match(/^(\s*)\$(?!\$)(.+?)\$(\s*)$/);
+          if (inlineWrapped) return `${inlineWrapped[1]}${inlineWrapped[2]}${inlineWrapped[3]}`;
+
+          const displayWrapped = line.match(/^(\s*)\$\$(.+?)\$\$(\s*)$/);
+          if (displayWrapped) return `${displayWrapped[1]}${displayWrapped[2]}${displayWrapped[3]}`;
+
+          return line;
+        })
+        .join('\n');
+
+      return `\\begin{${envName}}${normalizedBody}\\end{${envName}}`;
+    }
+  );
+}
+
 function escapeLatex(text: string): string {
+  const normalizedText = normalizeMathEnvironmentSpacing(text);
   let result = '';
   let cursor = 0;
   let plainStart = 0;
 
   const flushPlain = (end: number): void => {
     if (end > plainStart) {
-      result += escapePlainTextSegment(text.slice(plainStart, end));
+      result += escapePlainTextSegment(normalizedText.slice(plainStart, end));
     }
   };
 
-  while (cursor < text.length) {
+  while (cursor < normalizedText.length) {
     let protectedEnd = -1;
 
-    if (text.startsWith('\\[', cursor)) {
-      const end = text.indexOf('\\]', cursor + 2);
+    if (normalizedText.startsWith('\\begin', cursor)) {
+      protectedEnd = findLatexEnvironmentEnd(normalizedText, cursor);
+    } else if (normalizedText.startsWith('\\[', cursor)) {
+      const end = normalizedText.indexOf('\\]', cursor + 2);
       if (end !== -1) protectedEnd = end + 2;
-    } else if (text.startsWith('\\(', cursor)) {
-      const end = text.indexOf('\\)', cursor + 2);
+    } else if (normalizedText.startsWith('\\(', cursor)) {
+      const end = normalizedText.indexOf('\\)', cursor + 2);
       if (end !== -1) protectedEnd = end + 2;
-    } else if (text.startsWith('$$', cursor) && !isEscaped(text, cursor)) {
-      protectedEnd = findInlineMathEnd(text, cursor, '$$');
-    } else if (text[cursor] === '$' && !isEscaped(text, cursor)) {
-      protectedEnd = findInlineMathEnd(text, cursor, '$');
-    } else if (text[cursor] === '\\') {
-      protectedEnd = consumeLatexCommand(text, cursor);
+    } else if (normalizedText.startsWith('$$', cursor) && !isEscaped(normalizedText, cursor)) {
+      protectedEnd = findInlineMathEnd(normalizedText, cursor, '$$');
+    } else if (normalizedText[cursor] === '$' && !isEscaped(normalizedText, cursor)) {
+      protectedEnd = findInlineMathEnd(normalizedText, cursor, '$');
+    } else if (normalizedText[cursor] === '\\') {
+      protectedEnd = consumeLatexCommand(normalizedText, cursor);
     }
 
     if (protectedEnd > cursor) {
       flushPlain(cursor);
-      result += text.slice(cursor, protectedEnd);
+      result += normalizedText.slice(cursor, protectedEnd);
       cursor = protectedEnd;
       plainStart = cursor;
       continue;
@@ -170,36 +303,88 @@ function escapeLatex(text: string): string {
     cursor += 1;
   }
 
-  flushPlain(text.length);
+  flushPlain(normalizedText.length);
   return result;
 }
 
-function flattenRichTextElement(element: unknown): string {
+type FlattenOptions = {
+  codeOnly?: boolean;
+};
+
+function isCodeTextElement(entry: Record<string, unknown>): boolean {
+  return entry.code === true || typeof entry.language === 'string';
+}
+
+async function flattenRichTextElement(
+  plugin: ReactRNPlugin,
+  element: unknown,
+  options: FlattenOptions = {}
+): Promise<string> {
   if (typeof element === 'string') return element;
   if (element === null || element === undefined) return '';
-  if (Array.isArray(element)) {
-    return element.map(flattenRichTextElement).join('');
-  }
-  if (typeof element !== 'object') return '';
 
+  if (Array.isArray(element)) {
+    const flattenedParts = await Promise.all(
+      element.map((child) => flattenRichTextElement(plugin, child, options))
+    );
+    return flattenedParts.join('');
+  }
+
+  if (typeof element !== 'object') return '';
   const entry = element as Record<string, unknown>;
 
+  // RemNote LaTeX rich-text elements.
+  if (entry.i === 'x' && typeof entry.text === 'string') {
+    if (options.codeOnly) return '';
+    const isDisplay = entry.block === true;
+    return wrapRemnoteMath(entry.text, isDisplay);
+  }
+
   if (typeof entry.text === 'string') {
+    if (options.codeOnly && !isCodeTextElement(entry)) {
+      return '';
+    }
     return entry.text;
+  }
+
+  // Resolve Rem reference rich-text elements to their current visible page text.
+  if (entry.i === 'q' && typeof entry._id === 'string') {
+    // In code-only mode, rem references are usually formatting metadata
+    // (e.g. heading size controls) rather than code content.
+    if (options.codeOnly) {
+      return '';
+    }
+    const linkedRem = await plugin.rem.findOne(entry._id);
+    if (!linkedRem) {
+      return '';
+    }
+    const linkedText = (await flattenRichTextElement(plugin, linkedRem.text, options)).trim();
+    if (isFormattingMetadataLabel(linkedText)) {
+      return '';
+    }
+    return linkedText;
   }
 
   // Some rich text payloads nest fallback text for deleted/aliased Rem refs.
   if (entry.textOfDeletedRem !== undefined) {
-    return flattenRichTextElement(entry.textOfDeletedRem);
+    return flattenRichTextElement(plugin, entry.textOfDeletedRem, options);
   }
 
   return '';
 }
 
-async function richTextToString(_plugin: ReactRNPlugin, text?: unknown): Promise<string> {
+async function richTextToString(
+  plugin: ReactRNPlugin,
+  text?: unknown,
+  options: FlattenOptions = {}
+): Promise<string> {
   if (text === null || text === undefined) return '';
-  const flattened = flattenRichTextElement(text).trim();
-  return flattened;
+  const flattened = await flattenRichTextElement(plugin, text, options);
+  const trimmed = flattened.trim();
+  if (isFormattingMetadataLabel(trimmed)) {
+    return '';
+  }
+  return trimmed;
 }
 
 async function getRemTitle(plugin: ReactRNPlugin, rem: Rem): Promise<string> {
@@ -208,13 +393,21 @@ async function getRemTitle(plugin: ReactRNPlugin, rem: Rem): Promise<string> {
 
 async function getBoundaryBlock(plugin: ReactRNPlugin, boundaryRem: Rem, label: string): Promise<string> {
   const children = await boundaryRem.getChildrenRem();
-  const lines: string[] = [];
+  const codeLines: string[] = [];
+  const plainLines: string[] = [];
 
   const collectDescendantText = async (rem: Rem): Promise<void> => {
-    const line = await richTextToString(plugin, rem.text);
-    if (line) lines.push(line);
-    const backLine = await richTextToString(plugin, rem.backText);
-    if (backLine) lines.push(backLine);
+    const codeLine = await richTextToString(plugin, rem.text, { codeOnly: true });
+    const codeBackLine = await richTextToString(plugin, rem.backText, { codeOnly: true });
+
+    if (codeLine) codeLines.push(codeLine);
+    if (codeBackLine) codeLines.push(codeBackLine);
+
+    // Fallback for users who place plain text rather than a code block.
+    if (!codeLine && !codeBackLine) {
+      const fallbackLine = await richTextToString(plugin, rem.backText ?? rem.text);
+      if (fallbackLine) plainLines.push(fallbackLine);
+    }
 
     const nestedChildren = await rem.getChildrenRem();
     for (const child of nestedChildren) {
@@ -227,18 +420,32 @@ async function getBoundaryBlock(plugin: ReactRNPlugin, boundaryRem: Rem, label: 
       await collectDescendantText(child);
     }
   } else {
-    const directText = await richTextToString(plugin, boundaryRem.backText ?? boundaryRem.text);
+    const directCodeText = await richTextToString(plugin, boundaryRem.backText ?? boundaryRem.text, {
+      codeOnly: true,
+    });
+    const directText =
+      directCodeText || (await richTextToString(plugin, boundaryRem.backText ?? boundaryRem.text));
     if (directText) {
-      lines.push(directText);
+      if (directCodeText) {
+        codeLines.push(directText);
+      } else {
+        plainLines.push(directText);
+      }
     }
   }
 
-  const blockText = lines.join('\n').trim();
-  if (!blockText) {
+  const selectedLines = codeLines.length > 0 ? codeLines : plainLines;
+  const blockText = stripTrailingCodeMetadataArtifacts(selectedLines.join('\n').trim());
+  const normalizedBlockText = blockText
+    .split('\n')
+    .filter((line) => !isFormattingMetadataLabel(line))
+    .join('\n')
+    .trim();
+  if (!normalizedBlockText) {
     throw new Error(`${label} is empty. Add a code block underneath it.`);
   }
 
-  return blockText;
+  return normalizedBlockText;
 }
 
 async function getFocusedParentRem(plugin: ReactRNPlugin): Promise<Rem> {
@@ -265,6 +472,113 @@ async function todoComment(plugin: ReactRNPlugin, rem: Rem): Promise<string> {
   return text ? `% TODO ${marker} ${text}` : `% TODO ${marker}`;
 }
 
+async function getRemBodyText(
+  plugin: ReactRNPlugin,
+  rem: Rem
+): Promise<{ text: string; fromCodeBlock: boolean }> {
+  const codeText = await richTextToString(plugin, rem.text, { codeOnly: true });
+  const plainText = await getRemTitle(plugin, rem);
+
+  // Only treat content as raw code when the code-only extraction matches
+  // the full text extraction (modulo known metadata label lines). This avoids
+  // dropping inline LaTeX/citation fragments in normal prose rems.
+  const normalizeForCodeComparison = (value: string): string =>
+    value
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !isFormattingMetadataLabel(line))
+      .join('\n');
+
+  const normalizedCode = normalizeForCodeComparison(codeText);
+  const normalizedPlain = normalizeForCodeComparison(plainText);
+
+  if (normalizedCode && normalizedCode === normalizedPlain) {
+    return { text: codeText, fromCodeBlock: true };
+  }
+  return { text: plainText, fromCodeBlock: false };
+}
+
+function hasImageTokenInRichText(element: unknown): boolean {
+  if (element === null || element === undefined) return false;
+
+  if (Array.isArray(element)) {
+    for (const child of element) {
+      if (hasImageTokenInRichText(child)) return true;
+    }
+    return false;
+  }
+
+  if (typeof element === 'string') {
+    return false;
+  }
+
+  if (typeof element !== 'object') return false;
+  const entry = element as Record<string, unknown>;
+
+  if (entry.i === 'i') {
+    return true;
+  }
+
+  if (entry.textOfDeletedRem !== undefined) {
+    return hasImageTokenInRichText(entry.textOfDeletedRem);
+  }
+
+  return false;
+}
+
+function inferMediaTypeFromLatex(codeText: string): 'figure' | 'table' | undefined {
+  if (/\\begin\s*\{\s*figure\s*\}/.test(codeText)) return 'figure';
+  if (/\\begin\s*\{\s*table\s*\}/.test(codeText)) return 'table';
+  return undefined;
+}
+
+async function getMediaCodeBlocksFromImmediateChildren(
+  plugin: ReactRNPlugin,
+  rem: Rem
+): Promise<string[]> {
+  const children = await rem.getChildrenRem();
+  const blocks: string[] = [];
+
+  for (const child of children) {
+    const fromText = await richTextToString(plugin, child.text, { codeOnly: true });
+    const sanitizedFromText = fromText ? stripTrailingCodeMetadataArtifacts(fromText) : '';
+    if (sanitizedFromText && inferMediaTypeFromLatex(sanitizedFromText)) {
+      blocks.push(sanitizedFromText);
+    }
+
+    const fromBackText = await richTextToString(plugin, child.backText, { codeOnly: true });
+    const sanitizedFromBackText = fromBackText ? stripTrailingCodeMetadataArtifacts(fromBackText) : '';
+    if (sanitizedFromBackText && inferMediaTypeFromLatex(sanitizedFromBackText)) {
+      blocks.push(sanitizedFromBackText);
+    }
+  }
+
+  return blocks;
+}
+
+function buildVisibleWarningBlock(message: string): string {
+  const escapedMessage = message
+    .replace(/\\/g, '\\textbackslash{}')
+    .replace(/\{/g, '\\{')
+    .replace(/\}/g, '\\}')
+    .replace(/_/g, '\\_')
+    .replace(/%/g, '\\%')
+    .replace(/&/g, '\\&')
+    .replace(/#/g, '\\#')
+    .replace(/\$/g, '\\$')
+    .replace(/\^/g, '\\textasciicircum{}');
+
+  return [
+    '\\begin{center}',
+    '\\fbox{\\begin{minipage}{0.95\\linewidth}',
+    '\\textbf{REM2TEX WARNING}',
+    '',
+    escapedMessage,
+    '\\end{minipage}}',
+    '\\end{center}',
+  ].join('\n');
+}
+
 async function serializeNode(
   plugin: ReactRNPlugin,
   rem: Rem,
@@ -277,7 +591,26 @@ async function serializeNode(
     return;
   }
 
-  const title = await getRemTitle(plugin, rem);
+  const hasImageToken = hasImageTokenInRichText(rem.text) || hasImageTokenInRichText(rem.backText);
+  if (hasImageToken) {
+    const mediaBlocks = await getMediaCodeBlocksFromImmediateChildren(plugin, rem);
+    if (mediaBlocks.length === 0) {
+      const remTitle = await getRemTitle(plugin, rem);
+      const warningText = remTitle
+        ? `Image rem "${remTitle}" must include at least one child code block containing \\begin{figure} or \\begin{table}.`
+        : 'Image rem must include at least one child code block containing \\begin{figure} or \\begin{table}.';
+      output.push(buildVisibleWarningBlock(warningText));
+      output.push('');
+      return;
+    }
+    for (const mediaBlock of mediaBlocks) {
+      output.push(mediaBlock);
+      output.push('');
+    }
+    return;
+  }
+
+  const { text: title, fromCodeBlock } = await getRemBodyText(plugin, rem);
   const headingStyle = await rem.getFontSize();
   const isHeading = headingStyle !== undefined;
 
@@ -297,7 +630,7 @@ async function serializeNode(
   }
 
   if (title) {
-    output.push(escapeLatex(title));
+    output.push(fromCodeBlock ? title : escapeLatex(title));
   }
 
   const children = await rem.getChildrenRem();
@@ -348,20 +681,27 @@ export async function runRem2TexConversion(plugin: ReactRNPlugin): Promise<strin
     }
 
     const firstChild = children[0];
-    const lastChild = children[children.length - 1];
     const firstName = await getRemTitle(plugin, firstChild);
-    const lastName = await getRemTitle(plugin, lastChild);
-
     if (firstName !== REQUIRED_PREAMBLE_NAME) {
       throw new Error(`First child must be "${REQUIRED_PREAMBLE_NAME}".`);
     }
-    if (lastName !== REQUIRED_END_NAME) {
-      throw new Error(`Last child must be "${REQUIRED_END_NAME}".`);
+
+    let endIndex = -1;
+    for (let i = 1; i < children.length; i += 1) {
+      const childName = await getRemTitle(plugin, children[i]);
+      if (childName === REQUIRED_END_NAME) {
+        endIndex = i;
+        break;
+      }
+    }
+    if (endIndex === -1) {
+      throw new Error(`Could not find "${REQUIRED_END_NAME}" after "${REQUIRED_PREAMBLE_NAME}".`);
     }
 
     const preamble = await getBoundaryBlock(plugin, firstChild, REQUIRED_PREAMBLE_NAME);
-    const endBlock = await getBoundaryBlock(plugin, lastChild, REQUIRED_END_NAME);
-    const bodyRems = children.slice(1, -1);
+    const endRem = children[endIndex];
+    const endBlock = await getBoundaryBlock(plugin, endRem, REQUIRED_END_NAME);
+    const bodyRems = children.slice(1, endIndex);
 
     const bodyLines: string[] = [];
     for (const bodyRem of bodyRems) {
