@@ -65,6 +65,8 @@ TODO rems are preserved as LaTeX comments in-place:
 - unfinished -> `% TODO [ ] ...`
 - finished -> `% TODO [X] ...`
 
+Pins and rem references **in the TODO rem’s own text** are resolved like normal body text (linked text, external `\cite{...}`, local `\ref{...}` when applicable). That differs from **regular paragraphs**: a local pin that points at another TODO rem in the export tree is omitted in paragraph output so checklist links do not pollute the prose, but the same pin inside a TODO line is kept so the comment still reads correctly.
+
 ## Preamble and End extraction
 
 `Preamble` and `End` are treated as boundary blocks:
@@ -138,7 +140,7 @@ Inside math environments (`equation`, `align`, `gather`, `multline`, and starred
 For normal text extraction:
 
 - rem reference tokens are context-aware
-- if a pin/reference points inside the current export hierarchy, it resolves as normal linked text
+- if a pin/reference points inside the current export hierarchy, it usually resolves as linked text, `\ref{...}` for labeled local figures/tables/code, or is omitted when it points at another TODO rem (see **TODO rem handling** above—omission does not apply to pins inside a TODO rem’s text)
 - if a pin/reference points outside the current export hierarchy, it is converted to a citation key
   derived from the first document ancestor and emitted as `\cite{...}`
 - query-like payload artifacts (e.g. segments beginning with `query:`) are suppressed and not emitted

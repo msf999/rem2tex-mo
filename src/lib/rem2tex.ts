@@ -315,6 +315,8 @@ type FlattenOptions = {
   hierarchyRemIds?: Set<string>;
   suppressExternalCitationWrap?: boolean;
   pinSourceLocation?: string;
+  /** When flattening a TODO rem's text, pins to other TODO rems should show linked text, not be dropped. */
+  todoContentResolvePinsAsText?: boolean;
 };
 
 function isCodeTextElement(entry: Record<string, unknown>): boolean {
@@ -535,8 +537,9 @@ async function flattenRichTextElement(
     }
 
     // If a local pin points to a TODO rem in the current export hierarchy,
-    // ignore it in output regardless of TODO completion state.
-    if (!isOutsideHierarchy) {
+    // ignore it in normal paragraph output (pins inside a TODO rem's own text
+    // opt in via todoContentResolvePinsAsText and resolve to linked text).
+    if (!isOutsideHierarchy && !options.todoContentResolvePinsAsText) {
       const isLinkedTodo = await linkedRem.isTodo();
       if (isLinkedTodo) {
         return '';
@@ -696,7 +699,10 @@ async function todoComment(
 ): Promise<string> {
   const status = await rem.getTodoStatus();
   const marker = status === 'Finished' ? '[X]' : '[ ]';
-  const text = await getRemTitle(plugin, rem, context);
+  const text = await richTextToString(plugin, rem.text, {
+    hierarchyRemIds: context.hierarchyRemIds,
+    todoContentResolvePinsAsText: true,
+  });
   return text ? `% TODO ${marker} ${text}` : `% TODO ${marker}`;
 }
 
