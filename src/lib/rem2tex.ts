@@ -532,6 +532,16 @@ async function flattenRichTextElement(
       const citation = toLatexCitation(documentCitationKey) || toLatexCitation(linkedText);
       return citation || `\\cite{rem_${entry._id}}`;
     }
+
+    // If a local pin points to a TODO rem in the current export hierarchy,
+    // ignore it in output regardless of TODO completion state.
+    if (!isOutsideHierarchy) {
+      const isLinkedTodo = await linkedRem.isTodo();
+      if (isLinkedTodo) {
+        return '';
+      }
+    }
+
     return linkedText;
   }
 
