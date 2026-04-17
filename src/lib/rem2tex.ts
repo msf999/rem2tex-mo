@@ -314,6 +314,7 @@ type FlattenOptions = {
   codeOnly?: boolean;
   hierarchyRemIds?: Set<string>;
   suppressExternalCitationWrap?: boolean;
+  pinSourceLocation?: string;
 };
 
 function isCodeTextElement(entry: Record<string, unknown>): boolean {
@@ -540,6 +541,17 @@ async function flattenRichTextElement(
       if (isLinkedTodo) {
         return '';
       }
+
+      const missingInfoError = await getLocalPinMissingInfoError(plugin, linkedRem);
+      if (missingInfoError) {
+        const locationSuffix = options.pinSourceLocation ? ` at ${options.pinSourceLocation}` : '';
+        throw new Error(`${missingInfoError}${locationSuffix}`);
+      }
+
+      const localRef = await resolveLocalPinAsRef(plugin, linkedRem);
+      if (localRef) {
+        return localRef;
+      }
     }
 
     return linkedText;
@@ -691,10 +703,14 @@ async function todoComment(
 async function getRemBodyText(
   plugin: ReactRNPlugin,
   rem: Rem,
-  context: Rem2TexConversionContext
+  context: Rem2TexConversionContext,
+  pinSourceLocation?: string
 ): Promise<{ text: string; fromCodeBlock: boolean }> {
   const codeText = await richTextToString(plugin, rem.text, { codeOnly: true });
-  const plainText = await getRemTitle(plugin, rem, context);
+  const plainText = await richTextToString(plugin, rem.text, {
+    hierarchyRemIds: context.hierarchyRemIds,
+    pinSourceLocation,
+  });
 
   // Only treat content as raw code when the code-only extraction matches
   // the full text extraction (modulo known metadata label lines). This avoids
@@ -749,6 +765,12 @@ function inferMediaTypeFromLatex(codeText: string): 'figure' | 'table' | undefin
   return undefined;
 }
 
+function extractLabelKeyFromLatex(codeText: string): string | undefined {
+  const match = codeText.match(/\\label\{([^}]+)\}/);
+  const key = match?.[1]?.trim();
+  return key || undefined;
+}
+
 async function getMediaCodeBlocksFromImmediateChildren(
   plugin: ReactRNPlugin,
   rem: Rem
@@ -771,6 +793,65 @@ async function getMediaCodeBlocksFromImmediateChildren(
   }
 
   return blocks;
+}
+
+async function getCodeBlockTextFromRem(plugin: ReactRNPlugin, rem: Rem): Promise<string | undefined> {
+  const fromText = await richTextToString(plugin, rem.text, { codeOnly: true });
+  const sanitizedFromText = fromText ? stripTrailingCodeMetadataArtifacts(fromText) : '';
+  if (sanitizedFromText) return sanitizedFromText;
+
+  const fromBackText = await richTextToString(plugin, rem.backText, { codeOnly: true });
+  const sanitizedFromBackText = fromBackText ? stripTrailingCodeMetadataArtifacts(fromBackText) : '';
+  if (sanitizedFromBackText) return sanitizedFromBackText;
+
+  return undefined;
+}
+
+async function resolveLocalPinAsRef(plugin: ReactRNPlugin, rem: Rem): Promise<string | undefined> {
+  const directCode = await getCodeBlockTextFromRem(plugin, rem);
+  if (directCode) {
+    const label = extractLabelKeyFromLatex(directCode);
+    if (label) {
+      return `\\ref{${label}}`;
+    }
+  }
+
+  const isImageRem = hasImageTokenInRichText(rem.text) || hasImageTokenInRichText(rem.backText);
+  if (isImageRem) {
+    const mediaBlocks = await getMediaCodeBlocksFromImmediateChildren(plugin, rem);
+    for (const mediaBlock of mediaBlocks) {
+      const label = extractLabelKeyFromLatex(mediaBlock);
+      if (label) {
+        return `\\ref{${label}}`;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+async function getLocalPinMissingInfoError(plugin: ReactRNPlugin, rem: Rem): Promise<string | undefined> {
+  const directCode = await getCodeBlockTextFromRem(plugin, rem);
+  if (directCode) {
+    if (!extractLabelKeyFromLatex(directCode)) {
+      return 'Pinned local code block is missing \\label{...}.';
+    }
+    return undefined;
+  }
+
+  const isImageRem = hasImageTokenInRichText(rem.text) || hasImageTokenInRichText(rem.backText);
+  if (isImageRem) {
+    const mediaBlocks = await getMediaCodeBlocksFromImmediateChildren(plugin, rem);
+    if (mediaBlocks.length === 0) {
+      return 'Pinned local image rem is missing a child media code block.';
+    }
+    const hasLabel = mediaBlocks.some((block) => Boolean(extractLabelKeyFromLatex(block)));
+    if (!hasLabel) {
+      return 'Pinned local image media code block is missing \\label{...}.';
+    }
+  }
+
+  return undefined;
 }
 
 function buildVisibleWarningBlock(message: string): string {
@@ -801,7 +882,9 @@ async function serializeNode(
   rem: Rem,
   currentHeadingLevel: number,
   output: string[],
-  context: Rem2TexConversionContext
+  context: Rem2TexConversionContext,
+  currentSectionTitle?: string,
+  currentSubsectionTitle?: string
 ): Promise<void> {
   const isTodo = await rem.isTodo();
   if (isTodo) {
@@ -828,7 +911,17 @@ async function serializeNode(
     return;
   }
 
-  const { text: title, fromCodeBlock } = await getRemBodyText(plugin, rem, context);
+  const pinSourceLocation = currentSubsectionTitle
+    ? `section "${currentSectionTitle ?? 'Unknown'}", subsection "${currentSubsectionTitle}"`
+    : currentSectionTitle
+      ? `section "${currentSectionTitle}"`
+      : undefined;
+  const { text: title, fromCodeBlock } = await getRemBodyText(
+    plugin,
+    rem,
+    context,
+    pinSourceLocation
+  );
   const headingStyle = await rem.getFontSize();
   const isHeading = headingStyle !== undefined;
 
@@ -841,8 +934,19 @@ async function serializeNode(
     }
 
     const children = await rem.getChildrenRem();
+    const nextSectionTitle = headingLevel === 1 ? title : currentSectionTitle;
+    const nextSubsectionTitle =
+      headingLevel === 1 ? undefined : headingLevel === 2 ? title : currentSubsectionTitle;
     for (const child of children) {
-      await serializeNode(plugin, child, headingLevel, output, context);
+      await serializeNode(
+        plugin,
+        child,
+        headingLevel,
+        output,
+        context,
+        nextSectionTitle,
+        nextSubsectionTitle
+      );
     }
     return;
   }
@@ -866,7 +970,15 @@ async function serializeNode(
   }
 
   for (const child of nonTodoChildren) {
-    await serializeNode(plugin, child, currentHeadingLevel, output, context);
+    await serializeNode(
+      plugin,
+      child,
+      currentHeadingLevel,
+      output,
+      context,
+      currentSectionTitle,
+      currentSubsectionTitle
+    );
   }
 }
 
@@ -927,7 +1039,7 @@ export async function runRem2TexConversion(plugin: ReactRNPlugin): Promise<strin
 
     const bodyLines: string[] = [];
     for (const bodyRem of bodyRems) {
-      await serializeNode(plugin, bodyRem, 0, bodyLines, context);
+      await serializeNode(plugin, bodyRem, 0, bodyLines, context, undefined, undefined);
     }
     const body = bodyLines.join('\n').trim();
 
