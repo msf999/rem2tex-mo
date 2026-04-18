@@ -777,6 +777,20 @@ function buildDiagnosticRemTextPreview(element: unknown, depth = 0): string {
   return '';
 }
 
+function isPinOnlyDiagnosticPreview(value: string): boolean {
+  const normalized = value.trim();
+  return /^(\u27e8pin\u27e9|<pin>|\u2039pin\u203a)$/i.test(normalized);
+}
+
+async function isTodoHeadingMetadataChild(rem: Rem): Promise<boolean> {
+  const childHeadingStyle = await rem.getFontSize();
+  if (childHeadingStyle !== undefined) return false;
+  const children = await rem.getChildrenRem();
+  if (children.length > 0) return false;
+  const preview = sanitizeDiagnosticExcerpt(buildDiagnosticRemTextPreview(rem.text));
+  return isPinOnlyDiagnosticPreview(preview);
+}
+
 /** Avoid attributing paragraph diagnostics to nested flattens (linked rem text, document titles). */
 function omitPinSourceDiagnostics(o: FlattenOptions): FlattenOptions {
   return { ...o, pinSourceRemId: undefined, pinSourceRemExcerpt: undefined };
@@ -1611,8 +1625,11 @@ async function serializeNode(
   currentSectionTitle?: string,
   currentSubsectionTitle?: string
 ): Promise<void> {
+  const headingStyle = await rem.getFontSize();
+  const isHeading = headingStyle !== undefined;
   const isTodo = await rem.isTodo();
-  if (isTodo) {
+  // If a rem is both heading and todo, treat it as heading-only.
+  if (isTodo && !isHeading) {
     if (await shouldExportTodoAsComment(rem, context)) {
       output.push(await todoComment(plugin, rem, context));
     }
@@ -1663,10 +1680,16 @@ async function serializeNode(
   } catch (error) {
     throw await enrichConversionErrorWithSourceRem(plugin, error, rem, context);
   }
-  const { text: title, fromCodeBlock } = titleResult;
-  const headingStyle = await rem.getFontSize();
-  const isHeading = headingStyle !== undefined;
-
+  let { text: title, fromCodeBlock } = titleResult;
+  if (isHeading && isTodo) {
+    const rawTodoHeadingTitle = flattenRawTitleText(rem.text).trim();
+    // Todo headings carry internal status pins; prefer raw title text so we
+    // don't serialize those pins as citations (e.g. \cite{Status}).
+    if (rawTodoHeadingTitle.length > 0) {
+      title = rawTodoHeadingTitle;
+      fromCodeBlock = false;
+    }
+  }
   if (isHeading) {
     const headingLevel = Math.min(currentHeadingLevel + 1, HEADING_COMMANDS.length);
     const command = HEADING_COMMANDS[headingLevel - 1];
@@ -1680,6 +1703,9 @@ async function serializeNode(
     const nextSubsectionTitle =
       headingLevel === 1 ? undefined : headingLevel === 2 ? title : currentSubsectionTitle;
     for (const child of children) {
+      if (isTodo && (await isTodoHeadingMetadataChild(child))) {
+        continue;
+      }
       try {
         await serializeNode(
           plugin,
@@ -1704,7 +1730,8 @@ async function serializeNode(
   const children = await rem.getChildrenRem();
   const nonTodoChildren: Rem[] = [];
   for (const child of children) {
-    if (await child.isTodo()) {
+    const childIsHeading = (await child.getFontSize()) !== undefined;
+    if ((await child.isTodo()) && !childIsHeading) {
       if (await shouldExportTodoAsComment(child, context)) {
         output.push(await todoComment(plugin, child, context));
       }

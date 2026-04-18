@@ -32,7 +32,7 @@ Run it while focused on the parent rem you want to export.
 During conversion, Rem2Tex opens a **large popup** with a single scrolling document-style layout:
 
 - **From preamble** section (inline `Title`, `Author(s)`, and `Paper rem`)
-- **Todos** section (current policy: todos are copied as `% TODO ...` comments)
+- **Todos** section (shows the active policy: all / unfinished-only / none)
 - **Progress** section (completed stage log + explicit failure stage when conversion aborts)
 - conversion status card (running / success / error)
 
@@ -86,12 +86,17 @@ Rem2Tex uses RemNote heading formatting to decide heading nodes:
 
 ### TODO rem handling
 
-TODO rems are preserved as LaTeX comments in-place:
+TODO export is command-dependent:
 
-- unfinished -> `% TODO [ ] ...`
-- finished -> `% TODO [X] ...`
+- **Copy all todos**: unfinished and finished todos are exported as comments
+  - unfinished -> `% TODO [ ] ...`
+  - finished -> `% TODO [X] ...`
+- **Copy unfinished todos only**: only unfinished todos are exported as comments
+- **Do not copy todos**: todo rems are skipped from comment output
 
-Pins and rem references **in the TODO rem’s own text** are resolved like normal body text (linked text, external `\cite{...}`, local `\ref{...}` when applicable). That differs from **regular paragraphs**: a local pin that points at another TODO rem in the export tree is omitted in paragraph output so checklist links do not pollute the prose, but the same pin inside a TODO line is kept so the comment still reads correctly.
+If a rem is both a **heading and a todo**, it is treated as a heading only (todo status is ignored for section output).
+
+Pins and rem references **in exported TODO comment text** are resolved like normal body text (linked text, external `\cite{...}`, local `\ref{...}` when applicable). That differs from **regular paragraphs**: a local pin that points at another TODO rem in the export tree is omitted in paragraph output so checklist links do not pollute prose, but that omission rule does not apply inside exported TODO comment lines.
 
 ## Preamble and End extraction
 
