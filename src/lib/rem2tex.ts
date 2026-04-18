@@ -3,10 +3,13 @@ import type { ReactRNPlugin, Rem } from '@remnote/plugin-sdk';
 const REQUIRED_PREAMBLE_NAME = 'Preamble';
 const REQUIRED_END_NAME = 'End';
 const HEADING_COMMANDS = ['section', 'subsection', 'subsubsection', 'paragraph', 'subparagraph'];
+export type Rem2TexTodoExportMode = 'all' | 'unfinished' | 'none';
 export type Rem2TexConversionContext = {
   hierarchyRemIds: Set<string>;
   /** Root rem where /rem2tex was launched; used for relative error hierarchy paths. */
   rootRemId?: string;
+  /** Controls whether todos are emitted as `% TODO ...` comments. */
+  todoExportMode?: Rem2TexTodoExportMode;
 };
 
 /** Session key for Rem2Tex popup progress UI (`rem2tex_progress.tsx`). */
@@ -52,6 +55,7 @@ export type Rem2TexProgressUiState =
       startedAtIso?: string;
       preambleTitle?: string;
       preambleAuthor?: string;
+      todoExportMode?: Rem2TexTodoExportMode;
       progressLog: string[];
     }
   | {
@@ -60,6 +64,7 @@ export type Rem2TexProgressUiState =
       paperRemTitle?: string;
       preambleTitle?: string;
       preambleAuthor?: string;
+      todoExportMode?: Rem2TexTodoExportMode;
       progressLog: string[];
     }
   | {
@@ -88,6 +93,7 @@ export type Rem2TexProgressUiState =
       paperRemTitle?: string;
       preambleTitle?: string;
       preambleAuthor?: string;
+      todoExportMode?: Rem2TexTodoExportMode;
       /** Steps that finished before the failure. */
       progressLog?: string[];
       /** Current step label when the export stopped (e.g. converting body). */
@@ -202,6 +208,7 @@ export type Rem2TexProgressErrorContext = {
   paperRemTitle?: string;
   preambleTitle?: string;
   preambleAuthor?: string;
+  todoExportMode?: Rem2TexTodoExportMode;
   progressLog?: string[];
   failedAtLabel?: string;
 };
@@ -234,6 +241,7 @@ export function buildProgressErrorState(
       paperRemTitle: context?.paperRemTitle,
       preambleTitle: context?.preambleTitle,
       preambleAuthor: context?.preambleAuthor,
+      todoExportMode: context?.todoExportMode,
       progressLog: context?.progressLog,
       failedAtLabel: context?.failedAtLabel,
     };
@@ -256,6 +264,7 @@ export function buildProgressErrorState(
     paperRemTitle: context?.paperRemTitle,
     preambleTitle: context?.preambleTitle,
     preambleAuthor: context?.preambleAuthor,
+    todoExportMode: context?.todoExportMode,
     progressLog: context?.progressLog,
     failedAtLabel: context?.failedAtLabel,
   };
@@ -265,6 +274,16 @@ function buildClipboardReportFromConversionError(
   e: Rem2TexConversionError,
   ctx?: Rem2TexProgressErrorContext
 ): string {
+  const formatHierarchyForReport = (hierarchy: string[] | undefined): string | undefined => {
+    if (!hierarchy || hierarchy.length === 0) return undefined;
+    const rootTitle = ctx?.paperRemTitle?.trim();
+    if (!rootTitle) return hierarchy.join(' > ');
+    const idx = hierarchy.findIndex((part) => part.trim() === rootTitle);
+    const relative = idx >= 0 ? hierarchy.slice(idx + 1) : hierarchy;
+    if (relative.length === 0) return '(paper root)';
+    return relative.join(' > ');
+  };
+
   const lines: string[] = [
     'Rem2Tex export error',
     '===================',
@@ -300,8 +319,9 @@ function buildClipboardReportFromConversionError(
   if (e.pinTargetRemTitle || e.pinTargetRemHierarchy || e.pinTargetRemTextPreview) {
     lines.push('', 'Referenced rem missing \\label:');
     if (e.pinTargetRemTitle) lines.push(`  Rem title: ${e.pinTargetRemTitle}`);
-    if (e.pinTargetRemHierarchy && e.pinTargetRemHierarchy.length > 0) {
-      lines.push(`  Hierarchy: ${e.pinTargetRemHierarchy.join(' > ')}`);
+    const targetHierarchy = formatHierarchyForReport(e.pinTargetRemHierarchy);
+    if (targetHierarchy) {
+      lines.push(`  Hierarchy: ${targetHierarchy}`);
     }
     if (e.pinTargetRemTextPreview) {
       lines.push('  Text preview:');
@@ -311,8 +331,9 @@ function buildClipboardReportFromConversionError(
   if (e.sourceRemId || e.sourceRemTextPreview || e.sourceRemTitle) {
     lines.push('', 'Source rem (where export failed):');
     if (e.sourceRemTitle) lines.push(`  Rem title: ${e.sourceRemTitle}`);
-    if (e.sourceRemHierarchy && e.sourceRemHierarchy.length > 0) {
-      lines.push(`  Hierarchy: ${e.sourceRemHierarchy.join(' > ')}`);
+    const sourceHierarchy = formatHierarchyForReport(e.sourceRemHierarchy);
+    if (sourceHierarchy) {
+      lines.push(`  Hierarchy: ${sourceHierarchy}`);
     }
     if (e.sourceRemId) lines.push(`  Rem id: ${e.sourceRemId}`);
     if (e.sourceRemTextPreview) {
@@ -361,6 +382,7 @@ function buildClipboardReportPlain(
 
 export type Rem2TexRunOptions = {
   parentRem?: Rem;
+  todoExportMode?: Rem2TexTodoExportMode;
   onProgress?: (step: number, total: number, label: string) => void | Promise<void>;
 };
 
@@ -434,8 +456,16 @@ export function normalizeUnknownError(error: unknown): string {
   }
 }
 
-function toDateStamp(): string {
-  return new Date().toISOString().slice(0, 10);
+function toOutputTimestamp(now: Date = new Date()): string {
+  const day = String(now.getDate()).padStart(2, '0');
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const year = String(now.getFullYear());
+  const hours24 = now.getHours();
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const meridiem = hours24 >= 12 ? 'PM' : 'AM';
+  const hours12 = hours24 % 12 || 12;
+  const hours = String(hours12).padStart(2, '0');
+  return `${hours}:${minutes} ${meridiem} ${day}-${month}-${year}`;
 }
 
 function isEscaped(text: string, index: number): boolean {
@@ -1224,6 +1254,17 @@ async function todoComment(
   return text ? `% TODO ${marker} ${text}` : `% TODO ${marker}`;
 }
 
+async function shouldExportTodoAsComment(
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<boolean> {
+  const mode = context.todoExportMode ?? 'all';
+  if (mode === 'none') return false;
+  if (mode === 'all') return true;
+  const status = await rem.getTodoStatus();
+  return status !== 'Finished';
+}
+
 async function getRemBodyText(
   plugin: ReactRNPlugin,
   rem: Rem,
@@ -1572,7 +1613,9 @@ async function serializeNode(
 ): Promise<void> {
   const isTodo = await rem.isTodo();
   if (isTodo) {
-    output.push(await todoComment(plugin, rem, context));
+    if (await shouldExportTodoAsComment(rem, context)) {
+      output.push(await todoComment(plugin, rem, context));
+    }
     return;
   }
 
@@ -1662,7 +1705,9 @@ async function serializeNode(
   const nonTodoChildren: Rem[] = [];
   for (const child of children) {
     if (await child.isTodo()) {
-      output.push(await todoComment(plugin, child, context));
+      if (await shouldExportTodoAsComment(child, context)) {
+        output.push(await todoComment(plugin, child, context));
+      }
     } else {
       nonTodoChildren.push(child);
     }
@@ -1689,21 +1734,43 @@ async function serializeNode(
   }
 }
 
+async function getOrCreateRem2TexRoot(
+  plugin: ReactRNPlugin,
+  parent: Rem
+): Promise<Rem> {
+  const children = await parent.getChildrenRem();
+  for (const child of children) {
+    const childTitle = (flattenRawTitleText(child.text).trim() || (await getRemTitle(plugin, child)).trim());
+    if (childTitle === 'Rem2Tex') {
+      return child;
+    }
+  }
+
+  const rem2TexRoot = await plugin.rem.createRem();
+  if (!rem2TexRoot) {
+    throw new Error('Failed to create Rem2Tex exports root rem.');
+  }
+  await rem2TexRoot.setText(['Rem2Tex']);
+  await rem2TexRoot.setParent(parent);
+  return rem2TexRoot;
+}
+
 async function createOutputRem(plugin: ReactRNPlugin, parent: Rem, latex: string): Promise<string> {
-  const outputTitle = `Rem2Tex ${toDateStamp()}`;
+  const rem2TexRoot = await getOrCreateRem2TexRoot(plugin, parent);
+  const outputTitle = `Rem2Tex ${toOutputTimestamp()}`;
   const outputRem = await plugin.rem.createRem();
   if (!outputRem) {
     throw new Error('Failed to create output rem.');
   }
   await outputRem.setText([outputTitle]);
-  await outputRem.setParent(parent);
+  await outputRem.setParent(rem2TexRoot);
 
   const codeRem = await plugin.rem.createRem();
   if (!codeRem) {
     throw new Error('Failed to create code block rem.');
   }
   await codeRem.setParent(outputRem);
-  await codeRem.setText(await plugin.richText.code(latex, 'tex').value());
+  await codeRem.setText(await plugin.richText.code(latex, 'latex').value());
 
   return outputTitle;
 }
@@ -1720,6 +1787,7 @@ export async function runRem2TexConversion(
     const context: Rem2TexConversionContext = {
       hierarchyRemIds: new Set([parentRem._id, ...descendants.map((rem) => rem._id)]),
       rootRemId: parentRem._id,
+      todoExportMode: options?.todoExportMode ?? 'all',
     };
     const children = await parentRem.getChildrenRem();
 

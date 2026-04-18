@@ -97,11 +97,6 @@ function formatRelativeHierarchy(
   return parts.join(' > ');
 }
 
-function formatHierarchyRaw(hierarchy: string[] | undefined): string {
-  if (!hierarchy || hierarchy.length === 0) return 'Not captured';
-  return hierarchy.join(' > ');
-}
-
 export const Rem2TexProgress = () => {
   const plugin = usePlugin();
   const [state] = useSessionStorageState<Rem2TexProgressUiState>(
@@ -147,6 +142,29 @@ export const Rem2TexProgress = () => {
       : state.phase === 'error'
         ? state.progressLog ?? []
         : [];
+
+  const todoMode =
+    state.phase === 'running' || state.phase === 'success' || state.phase === 'error'
+      ? state.todoExportMode ?? 'all'
+      : 'all';
+  const todoSummary =
+    todoMode === 'all'
+      ? {
+          title: 'Yes',
+          detail: 'All todos copied as comments',
+          tone: 'text-emerald-700',
+        }
+      : todoMode === 'unfinished'
+        ? {
+            title: 'Unfinished only',
+            detail: 'Only unfinished todos copied as comments',
+            tone: 'text-amber-700',
+          }
+        : {
+            title: 'No',
+            detail: 'Todos are not copied as comments',
+            tone: 'text-slate-700',
+          };
 
   const hasOutline =
     failed &&
@@ -205,8 +223,13 @@ export const Rem2TexProgress = () => {
             <div className={panel}>
               <SectionTitle title="Todos" color="text-amber-700" />
               <p className="m-0 mt-2 text-sm text-slate-700">
-                Todos copied as comments: <span className="font-semibold text-emerald-700">Yes</span>{' '}
-                (<code className="text-xs">% TODO ...</code>)
+                {todoSummary.detail}:{' '}
+                <span className={`font-semibold ${todoSummary.tone}`}>{todoSummary.title}</span>{' '}
+                {todoMode === 'none' ? null : (
+                  <span>
+                    (<code className="text-xs">% TODO ...</code>)
+                  </span>
+                )}
               </p>
             </div>
           </div>
@@ -345,7 +368,7 @@ export const Rem2TexProgress = () => {
                     <InlineRow label="Rem title" value={state.pinTargetRemTitle || 'Not captured'} />
                     <InlineRow
                       label="Hierarchy"
-                      value={formatHierarchyRaw(state.pinTargetRemHierarchy)}
+                      value={formatRelativeHierarchy(state.pinTargetRemHierarchy, paperRemTitle)}
                     />
                     <InlineRow
                       label="Text preview"

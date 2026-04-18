@@ -1,6 +1,6 @@
 # Rem2Tex
 
-Rem2Tex is a RemNote plugin that converts a structured RemNote paper outline into a LaTeX document string and writes it back into RemNote as a dated export rem.
+Rem2Tex is a RemNote plugin that converts a structured RemNote paper outline into a LaTeX document string and writes it back into RemNote under a dedicated `Rem2Tex` exports rem.
 
 ## What Rem2Tex does
 
@@ -15,15 +15,17 @@ When you run the command:
   - preamble block
   - converted body
   - end block
-- It creates a new child under the paper root named `Rem2Tex YYYY-MM-DD`.
-- It writes the generated LaTeX into a child code block (`tex`) under that export rem.
+- It creates (if missing) a `Rem2Tex` child under the paper root where `/rem2tex` was started.
+- It creates a new export rem under that node named `Rem2Tex HH:MM AM/PM DD-MM-YYYY`.
+- It writes the generated LaTeX into a child code block (`latex`) under that export rem.
 
 ## Command
 
 The plugin registers:
 
-- Name: `Rem2Tex: Convert Paper to TeX`
-- Quick code: `/rem2tex`
+- `Rem2Tex: Convert Paper to TeX (Copy All Todos as Comments)` (`/rem2tex`)
+- `Rem2Tex: Convert Paper to TeX (Copy Unfinished Todos as Comments)` (`/rem2tex-unfinished`)
+- `Rem2Tex: Convert Paper to TeX (Do Not Copy Todos as Comments)` (`/rem2tex-no-todos`)
 
 Run it while focused on the parent rem you want to export.
 
@@ -224,7 +226,9 @@ To get stable output:
   - `Conclusion` (heading)
   - `End`
     - code block with `\begin{document}` closure/end material
-  - `Rem2Tex 2026-04-17` (auto-generated export)
+  - `Rem2Tex`
+    - `Rem2Tex 09:42 AM 18-04-2026` (auto-generated export)
+    - `Rem2Tex 11:05 AM 19-04-2026` (auto-generated export)
 
 ## Notes
 

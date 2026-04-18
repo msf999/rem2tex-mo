@@ -11,6 +11,7 @@ import {
   buildProgressErrorState,
   getFocusedParentRem,
   getRemTitle,
+  type Rem2TexTodoExportMode,
   tryReadPreambleTitleAuthor,
   type Rem2TexConversionContext,
   type Rem2TexProgressUiState,
@@ -62,14 +63,9 @@ async function onActivate(plugin: ReactRNPlugin) {
     },
   });
 
-  // Convert the focused Paper Rem tree into a TeX code block child.
-  await plugin.app.registerCommand({
-    id: 'rem2tex-convert-paper',
-    name: 'Rem2Tex: Convert Paper to TeX',
-    description:
-      'Convert a Paper rem tree into LaTeX using Preamble/End and heading-formatted sections.',
-    quickCode: 'rem2tex',
-    action: async () => {
+  const runExportWithTodoMode = async (
+    todoExportMode: Rem2TexTodoExportMode
+  ): Promise<void> => {
       let parentRem: Rem;
       let paperRemTitle: string | undefined;
       try {
@@ -103,12 +99,14 @@ async function onActivate(plugin: ReactRNPlugin) {
           startedAtIso,
           preambleTitle,
           preambleAuthor,
+              todoExportMode,
           progressLog: [],
         });
         await openOrReplaceRem2TexProgressPopup(plugin);
 
         const outputTitle = await runRem2TexConversion(plugin, {
           parentRem,
+          todoExportMode,
           onProgress: async (step, total, label) => {
             await plugin.storage.setSession(REM2TEX_PROGRESS_STORAGE_KEY, {
               phase: 'running',
@@ -119,6 +117,7 @@ async function onActivate(plugin: ReactRNPlugin) {
               startedAtIso,
               preambleTitle,
               preambleAuthor,
+              todoExportMode,
               progressLog: buildCompletedProgressLines(step),
             });
           },
@@ -130,6 +129,7 @@ async function onActivate(plugin: ReactRNPlugin) {
           paperRemTitle,
           preambleTitle,
           preambleAuthor,
+          todoExportMode,
           progressLog: buildCompletedProgressLines(REM2TEX_PROGRESS_TOTAL + 1),
         });
       } catch (error) {
@@ -141,12 +141,41 @@ async function onActivate(plugin: ReactRNPlugin) {
             paperRemTitle,
             preambleTitle: running?.preambleTitle,
             preambleAuthor: running?.preambleAuthor,
+            todoExportMode: running?.todoExportMode,
             progressLog: running?.progressLog,
             failedAtLabel: running?.label,
           })
         );
       }
-    },
+  };
+
+  // Convert the focused Paper rem tree into LaTeX and copy all todos as comments.
+  await plugin.app.registerCommand({
+    id: 'rem2tex-convert-paper',
+    name: 'Rem2Tex: Convert Paper to TeX (Copy All Todos as Comments)',
+    description:
+      'Convert a Paper rem tree into LaTeX using Preamble/End and heading-formatted sections; copy all todos as `% TODO ...` comments.',
+    quickCode: 'rem2tex',
+    action: async () => runExportWithTodoMode('all'),
+  });
+
+  // Convert and copy only unfinished todos as comments.
+  await plugin.app.registerCommand({
+    id: 'rem2tex-convert-paper-unfinished-todos',
+    name: 'Rem2Tex: Convert Paper to TeX (Copy Unfinished Todos as Comments)',
+    description:
+      'Convert a Paper rem tree into LaTeX and copy only unfinished todos as `% TODO ...` comments.',
+    quickCode: 'rem2tex-unfinished',
+    action: async () => runExportWithTodoMode('unfinished'),
+  });
+
+  // Convert and do not copy todos as comments.
+  await plugin.app.registerCommand({
+    id: 'rem2tex-convert-paper-no-todos',
+    name: 'Rem2Tex: Convert Paper to TeX (Do Not Copy Todos as Comments)',
+    description: 'Convert a Paper rem tree into LaTeX and skip todo comment output.',
+    quickCode: 'rem2tex-no-todos',
+    action: async () => runExportWithTodoMode('none'),
   });
 
   // Show a toast notification to the user.
