@@ -27,7 +27,27 @@ The plugin registers:
 
 Run it while focused on the parent rem you want to export.
 
-During conversion, Rem2Tex emits step toasts (for example `Rem2Tex 2/6: ...`) to show progress.
+During conversion, Rem2Tex opens a **large popup** with a single scrolling document-style layout:
+
+- **From preamble** section (inline `Title`, `Author(s)`, and `Paper rem`)
+- **Todos** section (current policy: todos are copied as `% TODO ...` comments)
+- **Progress** section (completed stage log + explicit failure stage when conversion aborts)
+- conversion status card (running / success / error)
+
+On failure, the popup shows a **structured report**:
+
+- error **code** (e.g. `MISSING LOCAL LABEL`)
+- red **error summary** (headline + what happened)
+- **Where it failed** details:
+  - section/subsection (when available)
+  - source rem title/id
+  - source rem hierarchy path **relative to the rem where `/rem2tex` was started**
+- source rem text preview
+- technical detail
+- linked pin target rem id (when available)
+- actionable suggestions
+
+Use **Copy full report** to copy the plain-text failure bundle (including source rem context and relative hierarchy path) for bug reports.
 
 ## Required top-level paper structure
 

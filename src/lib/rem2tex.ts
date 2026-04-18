@@ -3,9 +3,348 @@ import type { ReactRNPlugin, Rem } from '@remnote/plugin-sdk';
 const REQUIRED_PREAMBLE_NAME = 'Preamble';
 const REQUIRED_END_NAME = 'End';
 const HEADING_COMMANDS = ['section', 'subsection', 'subsubsection', 'paragraph', 'subparagraph'];
-type Rem2TexConversionContext = {
+export type Rem2TexConversionContext = {
   hierarchyRemIds: Set<string>;
+  /** Root rem where /rem2tex was launched; used for relative error hierarchy paths. */
+  rootRemId?: string;
 };
+
+/** Session key for Rem2Tex popup progress UI (`rem2tex_progress.tsx`). */
+export const REM2TEX_PROGRESS_STORAGE_KEY = 'rem2tex_progress_ui_v5';
+
+export const REM2TEX_PROGRESS_TOTAL = 5;
+
+/** Human-readable lines for completed pipeline steps before the current `step` (1-based). */
+export function buildCompletedProgressLines(step: number): string[] {
+  const lines: string[] = [];
+  if (step >= 2) lines.push('✓ Validated paper structure (Preamble / End).');
+  if (step >= 3) lines.push('✓ Read Preamble block.');
+  if (step >= 4) lines.push('✓ Read End block.');
+  if (step >= 5) lines.push('✓ Converted body to LaTeX.');
+  if (step >= 6) lines.push('✓ Created export rem.');
+  return lines;
+}
+
+/** Best-effort `\title`, `\author`, `\documentclass{…}` from raw preamble text. */
+export function parsePreambleLatexMetadata(preamble: string): {
+  title: string;
+  author: string;
+  documentClass: string;
+} {
+  const documentClass =
+    preamble.match(/\\documentclass(?:\[[^\]]*\])?\s*\{([^}]+)\}/)?.[1]?.trim() ?? '';
+  const titleM = preamble.match(/\\title\s*\{([^}]*)\}/);
+  const authorM = preamble.match(/\\author\s*\{([^}]*)\}/);
+  return {
+    title: titleM?.[1]?.trim() ?? '',
+    author: authorM?.[1]?.trim() ?? '',
+    documentClass,
+  };
+}
+
+export type Rem2TexProgressUiState =
+  | {
+      phase: 'running';
+      step: number;
+      total: number;
+      label: string;
+      paperRemTitle?: string;
+      startedAtIso?: string;
+      preambleTitle?: string;
+      preambleAuthor?: string;
+      progressLog: string[];
+    }
+  | {
+      phase: 'success';
+      outputTitle: string;
+      paperRemTitle?: string;
+      preambleTitle?: string;
+      preambleAuthor?: string;
+      progressLog: string[];
+    }
+  | {
+      phase: 'error';
+      /** Full plain-text report for “Copy report” */
+      message: string;
+      headline: string;
+      errorCode: string;
+      whatHappened: string;
+      technicalDetail?: string;
+      location?: { section?: string; subsection?: string };
+      linkedRemId?: string;
+      /** Rem whose text contained the pin (paragraph / block being exported). */
+      sourceRemId?: string;
+      /** Plain-text-style preview; pins shown as ⟨pin⟩, no async resolution. */
+      sourceRemTextPreview?: string;
+      /** Outline / card title for the source rem (helps when preview is only ⟨pin⟩). */
+      sourceRemTitle?: string;
+      /** Hierarchy path from paper root to source rem (excluding root). */
+      sourceRemHierarchy?: string[];
+      hints: string[];
+      paperRemTitle?: string;
+      preambleTitle?: string;
+      preambleAuthor?: string;
+      /** Steps that finished before the failure. */
+      progressLog?: string[];
+      /** Current step label when the export stopped (e.g. converting body). */
+      failedAtLabel?: string;
+    };
+
+export type Rem2TexPinLocation = {
+  section?: string;
+  subsection?: string;
+};
+
+export type Rem2TexConversionErrorOptions = {
+  code: string;
+  headline: string;
+  whatHappened: string;
+  technicalDetail?: string;
+  location?: Rem2TexPinLocation;
+  linkedRemId?: string;
+  sourceRemId?: string;
+  sourceRemTextPreview?: string;
+  /** Display title of the rem that contained the pin (may differ from preview text). */
+  sourceRemTitle?: string;
+  /** Hierarchy path from paper root to source rem (excluding root). */
+  sourceRemHierarchy?: string[];
+  hints?: string[];
+};
+
+/** Thrown for user-fixable export issues (pins, structure, etc.); preserved through `runRem2TexConversion`. */
+export class Rem2TexConversionError extends Error {
+  readonly code: string;
+  readonly headline: string;
+  readonly whatHappened: string;
+  readonly technicalDetail?: string;
+  readonly location?: Rem2TexPinLocation;
+  readonly linkedRemId?: string;
+  readonly sourceRemId?: string;
+  readonly sourceRemTextPreview?: string;
+  readonly sourceRemTitle?: string;
+  readonly sourceRemHierarchy?: string[];
+  readonly hints: string[];
+
+  constructor(opts: Rem2TexConversionErrorOptions) {
+    const parts = [opts.whatHappened, opts.technicalDetail].filter(
+      (p): p is string => typeof p === 'string' && p.length > 0
+    );
+    super(parts.join(' ') || opts.headline);
+    this.name = 'Rem2TexConversionError';
+    this.code = opts.code;
+    this.headline = opts.headline;
+    this.whatHappened = opts.whatHappened;
+    this.technicalDetail = opts.technicalDetail;
+    this.location = opts.location;
+    this.linkedRemId = opts.linkedRemId;
+    this.sourceRemId = opts.sourceRemId;
+    this.sourceRemTextPreview = opts.sourceRemTextPreview;
+    this.sourceRemTitle = opts.sourceRemTitle;
+    this.sourceRemHierarchy = opts.sourceRemHierarchy;
+    this.hints = opts.hints ?? [];
+  }
+}
+
+export function isRem2TexConversionError(e: unknown): e is Rem2TexConversionError {
+  return e instanceof Rem2TexConversionError;
+}
+
+function parseTrailingLocationFromMessage(message: string): {
+  cleaned: string;
+  location?: Rem2TexPinLocation;
+} {
+  const re =
+    /\s+at\s+section\s+"([^"]+)"(?:\s*,\s*subsection\s+"([^"]+)")?\s*\.?\s*$/;
+  const m = message.match(re);
+  if (!m) return { cleaned: message };
+  return {
+    cleaned: message.replace(re, '').trim(),
+    location: { section: m[1], subsection: m[2] },
+  };
+}
+
+function heuristicHintsForPlainError(cleanedMessage: string): string[] {
+  const hints: string[] = [];
+  const m = cleanedMessage;
+  if (/Preamble/i.test(m)) {
+    hints.push('The first child of your paper rem must be named exactly `Preamble` (capital P).');
+  }
+  if (/\bEnd\b/i.test(m) && /Preamble/i.test(m)) {
+    hints.push('Add an `End` rem somewhere after `Preamble` (not necessarily last) so Rem2Tex knows where the body stops.');
+  }
+  if (/focused rem|No focused rem/i.test(m)) {
+    hints.push('Click the paper root rem so it is focused, or select it, then run `/rem2tex` again.');
+  }
+  if (/empty/i.test(m) && /Preamble|End/i.test(m)) {
+    hints.push('Put the LaTeX in a child code block under the boundary rem (or paste plain text if you have no code block).');
+  }
+  if (hints.length === 0) {
+    hints.push('Fix the issue described above and run Rem2Tex again. If the message is unclear, copy the full report and share it when asking for help.');
+  }
+  return hints;
+}
+
+export type Rem2TexProgressErrorContext = {
+  paperRemTitle?: string;
+  preambleTitle?: string;
+  preambleAuthor?: string;
+  progressLog?: string[];
+  failedAtLabel?: string;
+};
+
+/** Builds session payload for the progress popup from any thrown value. */
+export function buildProgressErrorState(
+  error: unknown,
+  context?: Rem2TexProgressErrorContext
+): Extract<Rem2TexProgressUiState, { phase: 'error' }> {
+  if (isRem2TexConversionError(error)) {
+    const e = error;
+    const message = buildClipboardReportFromConversionError(e, context);
+    return {
+      phase: 'error',
+      message,
+      headline: e.headline,
+      errorCode: e.code,
+      whatHappened: e.whatHappened,
+      technicalDetail: e.technicalDetail,
+      location: e.location,
+      linkedRemId: e.linkedRemId,
+      sourceRemId: e.sourceRemId,
+      sourceRemTextPreview: e.sourceRemTextPreview,
+      sourceRemTitle: e.sourceRemTitle,
+      sourceRemHierarchy: e.sourceRemHierarchy,
+      hints: e.hints.length > 0 ? e.hints : heuristicHintsForPlainError(e.whatHappened),
+      paperRemTitle: context?.paperRemTitle,
+      preambleTitle: context?.preambleTitle,
+      preambleAuthor: context?.preambleAuthor,
+      progressLog: context?.progressLog,
+      failedAtLabel: context?.failedAtLabel,
+    };
+  }
+
+  const raw = normalizeUnknownError(error);
+  const { cleaned, location } = parseTrailingLocationFromMessage(raw);
+  const hints = heuristicHintsForPlainError(cleaned);
+  const message = buildClipboardReportPlain(cleaned, location, context);
+
+  return {
+    phase: 'error',
+    message,
+    headline: 'Rem2Tex could not finish the export',
+    errorCode: 'EXPORT_FAILED',
+    whatHappened: cleaned,
+    technicalDetail: location ? undefined : cleaned.trim() !== raw.trim() ? raw : undefined,
+    location,
+    hints,
+    paperRemTitle: context?.paperRemTitle,
+    preambleTitle: context?.preambleTitle,
+    preambleAuthor: context?.preambleAuthor,
+    progressLog: context?.progressLog,
+    failedAtLabel: context?.failedAtLabel,
+  };
+}
+
+function buildClipboardReportFromConversionError(
+  e: Rem2TexConversionError,
+  ctx?: Rem2TexProgressErrorContext
+): string {
+  const lines: string[] = [
+    'Rem2Tex export error',
+    '===================',
+    '',
+    `Code: ${e.code}`,
+    `Summary: ${e.headline}`,
+    '',
+    e.whatHappened,
+  ];
+  if (ctx?.progressLog && ctx.progressLog.length > 0) {
+    lines.push('', 'Progress before failure:');
+    for (const row of ctx.progressLog) lines.push(`  ${row}`);
+  }
+  if (ctx?.failedAtLabel) {
+    lines.push('', `Failed during: ${ctx.failedAtLabel}`);
+  }
+  if (ctx?.preambleTitle || ctx?.preambleAuthor) {
+    lines.push('', 'From preamble:');
+    if (ctx.preambleTitle) lines.push(`  Title: ${ctx.preambleTitle}`);
+    if (ctx.preambleAuthor) lines.push(`  Author(s): ${ctx.preambleAuthor}`);
+  }
+  if (e.technicalDetail) {
+    lines.push('', 'Technical:', e.technicalDetail);
+  }
+  if (e.location?.section || e.location?.subsection) {
+    lines.push('', 'Location in outline:');
+    if (e.location.section) lines.push(`  Section: ${e.location.section}`);
+    if (e.location.subsection) lines.push(`  Subsection: ${e.location.subsection}`);
+  }
+  if (e.linkedRemId) {
+    lines.push('', `Pin target rem id: ${e.linkedRemId}`);
+  }
+  if (e.sourceRemId || e.sourceRemTextPreview || e.sourceRemTitle) {
+    lines.push('', 'Source rem (where the pin appears):');
+    if (e.sourceRemTitle) lines.push(`  Rem title: ${e.sourceRemTitle}`);
+    if (e.sourceRemHierarchy && e.sourceRemHierarchy.length > 0) {
+      lines.push(`  Hierarchy: ${e.sourceRemHierarchy.join(' > ')}`);
+    }
+    if (e.sourceRemId) lines.push(`  Rem id: ${e.sourceRemId}`);
+    if (e.sourceRemTextPreview) {
+      lines.push('  Text preview (pins shown as ⟨pin⟩):');
+      lines.push(`  ${e.sourceRemTextPreview.replace(/\n/g, ' ')}`);
+    }
+  }
+  if (e.hints.length > 0) {
+    lines.push('', 'Suggestions:');
+    for (const h of e.hints) lines.push(`  • ${h}`);
+  }
+  if (ctx?.paperRemTitle) {
+    lines.push('', `Paper rem title: ${ctx.paperRemTitle}`);
+  }
+  return lines.join('\n');
+}
+
+function buildClipboardReportPlain(
+  cleaned: string,
+  location: Rem2TexPinLocation | undefined,
+  ctx?: Rem2TexProgressErrorContext
+): string {
+  const lines = ['Rem2Tex export error', '===================', '', cleaned];
+  if (ctx?.progressLog && ctx.progressLog.length > 0) {
+    lines.push('', 'Progress before failure:');
+    for (const row of ctx.progressLog) lines.push(`  ${row}`);
+  }
+  if (ctx?.failedAtLabel) {
+    lines.push('', `Failed during: ${ctx.failedAtLabel}`);
+  }
+  if (ctx?.preambleTitle || ctx?.preambleAuthor) {
+    lines.push('', 'From preamble:');
+    if (ctx.preambleTitle) lines.push(`  Title: ${ctx.preambleTitle}`);
+    if (ctx.preambleAuthor) lines.push(`  Author(s): ${ctx.preambleAuthor}`);
+  }
+  if (location?.section || location?.subsection) {
+    lines.push('', 'Location in outline:');
+    if (location.section) lines.push(`  Section: ${location.section}`);
+    if (location.subsection) lines.push(`  Subsection: ${location.subsection}`);
+  }
+  if (ctx?.paperRemTitle) {
+    lines.push('', `Paper rem title: ${ctx.paperRemTitle}`);
+  }
+  return lines.join('\n');
+}
+
+export type Rem2TexRunOptions = {
+  parentRem?: Rem;
+  onProgress?: (step: number, total: number, label: string) => void | Promise<void>;
+};
+
+async function notifyConversionProgress(
+  options: Rem2TexRunOptions | undefined,
+  step: number,
+  label: string
+): Promise<void> {
+  if (options?.onProgress) {
+    await options.onProgress(step, REM2TEX_PROGRESS_TOTAL, label);
+  }
+}
 
 function isFormattingMetadataLabel(value: string): boolean {
   const normalized = value.trim();
@@ -314,10 +653,75 @@ type FlattenOptions = {
   codeOnly?: boolean;
   hierarchyRemIds?: Set<string>;
   suppressExternalCitationWrap?: boolean;
-  pinSourceLocation?: string;
+  /** Where the pin appears in the paper outline (for error reporting). */
+  pinLocation?: Rem2TexPinLocation;
+  /** Rem id for the paragraph/block whose text is being flattened (pin source). */
+  pinSourceRemId?: string;
+  /** Snapshot for errors: same rem’s text with ⟨pin⟩ placeholders, no async lookups. */
+  pinSourceRemExcerpt?: string;
+  /** Card/outline title for the rem that contains the pin (for errors when preview is only ⟨pin⟩). */
+  pinSourceRemTitle?: string;
   /** When flattening a TODO rem's text, pins to other TODO rems should show linked text, not be dropped. */
   todoContentResolvePinsAsText?: boolean;
 };
+
+const DIAGNOSTIC_PREVIEW_MAX = 1400;
+
+/** Truncate for UI / clipboard; full structure preserved up to max chars. */
+function truncateDiagnosticPreview(s: string, max = DIAGNOSTIC_PREVIEW_MAX): string {
+  const normalized = s.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 1)}…`;
+}
+
+/** Strip RemNote-injected `query:` snippets from diagnostic previews (same noise as export). */
+function sanitizeDiagnosticExcerpt(s: string): string {
+  return s
+    .replace(/^query:\s*/i, '')
+    .replace(/\s+query:\s+/gi, ' ')
+    .trim();
+}
+
+/**
+ * Builds a readable preview of rem rich text without resolving pins (shows ⟨pin⟩).
+ * Used when reporting which paragraph triggered a pin validation error.
+ */
+function buildDiagnosticRemTextPreview(element: unknown, depth = 0): string {
+  if (depth > 12) return '';
+  if (typeof element === 'string') return element;
+  if (element === null || element === undefined) return '';
+  if (Array.isArray(element)) {
+    return element.map((c) => buildDiagnosticRemTextPreview(c, depth + 1)).join('');
+  }
+  if (typeof element !== 'object') return '';
+  const entry = element as Record<string, unknown>;
+
+  if (entry.i === 'x' && typeof entry.text === 'string') {
+    const isDisplay = entry.block === true;
+    return wrapRemnoteMath(entry.text, isDisplay);
+  }
+  if (entry.i === 'q') {
+    return '⟨pin⟩';
+  }
+  if (entry.i === 'i') {
+    return '⟨image⟩';
+  }
+  if (typeof entry.text === 'string') {
+    const isPlainTextNode = entry.i === 'm' || entry.i === undefined;
+    if (!isPlainTextNode) return '';
+    if (isFormattingMetadataLabel(entry.text)) return '';
+    return entry.text;
+  }
+  if (entry.textOfDeletedRem !== undefined) {
+    return buildDiagnosticRemTextPreview(entry.textOfDeletedRem, depth + 1);
+  }
+  return '';
+}
+
+/** Avoid attributing paragraph diagnostics to nested flattens (linked rem text, document titles). */
+function omitPinSourceDiagnostics(o: FlattenOptions): FlattenOptions {
+  return { ...o, pinSourceRemId: undefined, pinSourceRemExcerpt: undefined };
+}
 
 function isCodeTextElement(entry: Record<string, unknown>): boolean {
   return entry.code === true || typeof entry.language === 'string';
@@ -447,7 +851,7 @@ async function getCitationKeyFromDocumentAncestor(
     await flattenRichTextElement(
       plugin,
       documentAncestor.text,
-      { ...options, suppressExternalCitationWrap: true },
+      { ...omitPinSourceDiagnostics(options), suppressExternalCitationWrap: true },
       new Set(seenRemIds),
       depth + 1
     )
@@ -513,7 +917,7 @@ async function flattenRichTextElement(
       await flattenRichTextElement(
         plugin,
         linkedRem.text,
-        { ...options, suppressExternalCitationWrap: true },
+        { ...omitPinSourceDiagnostics(options), suppressExternalCitationWrap: true },
         nextSeen,
         depth + 1
       )
@@ -547,8 +951,23 @@ async function flattenRichTextElement(
 
       const missingInfoError = await getLocalPinMissingInfoError(plugin, linkedRem);
       if (missingInfoError) {
-        const locationSuffix = options.pinSourceLocation ? ` at ${options.pinSourceLocation}` : '';
-        throw new Error(`${missingInfoError}${locationSuffix}`);
+        throw new Rem2TexConversionError({
+          code: 'MISSING_LOCAL_LABEL',
+          headline: 'Pin needs a LaTeX \\label in the target figure/table/code',
+          whatHappened:
+            'This paragraph contains a rem link (pin) to local media (a code block or image rem) inside your paper. Rem2Tex turns that into \\ref{…}, but the exported LaTeX must include \\label{…} so the reference key exists.',
+          technicalDetail: missingInfoError,
+          location: options.pinLocation,
+          linkedRemId: entry._id,
+          sourceRemId: options.pinSourceRemId,
+          sourceRemTextPreview: options.pinSourceRemExcerpt,
+          sourceRemTitle: options.pinSourceRemTitle,
+          hints: [
+            'Open the rem you linked to and add \\label{your-key} inside the figure, table, or equation LaTeX (same child code block Rem2Tex exports).',
+            'For image rems, the \\label must live in a child code block under the image (figure/table environment), not only in the image caption rem text.',
+            'Pick a key you can reuse in text (e.g. \\label{fig:setup}) and re-run Rem2Tex.',
+          ],
+        });
       }
 
       const localRef = await resolveLocalPinAsRef(plugin, linkedRem);
@@ -598,7 +1017,7 @@ async function richTextToString(
   return normalizeAdjacentCitations(trimmed);
 }
 
-async function getRemTitle(
+export async function getRemTitle(
   plugin: ReactRNPlugin,
   rem: Rem,
   context?: Rem2TexConversionContext
@@ -675,7 +1094,43 @@ async function getBoundaryBlock(
   return normalizedBlockText;
 }
 
-async function getFocusedParentRem(plugin: ReactRNPlugin): Promise<Rem> {
+/**
+ * Reads the Preamble block and returns title/author for UI. Returns `undefined` if the paper layout
+ * is not valid or the preamble cannot be read.
+ */
+export async function tryReadPreambleTitleAuthor(
+  plugin: ReactRNPlugin,
+  parentRem: Rem
+): Promise<{ title: string; author: string } | undefined> {
+  try {
+    const descendants = await parentRem.getDescendants();
+    const context: Rem2TexConversionContext = {
+      hierarchyRemIds: new Set([parentRem._id, ...descendants.map((rem) => rem._id)]),
+      rootRemId: parentRem._id,
+    };
+    const children = await parentRem.getChildrenRem();
+    if (children.length < 2) return undefined;
+    const firstChild = children[0];
+    const firstName = await getRemTitle(plugin, firstChild, context);
+    if (firstName !== REQUIRED_PREAMBLE_NAME) return undefined;
+    let endIndex = -1;
+    for (let i = 1; i < children.length; i += 1) {
+      const childName = await getRemTitle(plugin, children[i], context);
+      if (childName === REQUIRED_END_NAME) {
+        endIndex = i;
+        break;
+      }
+    }
+    if (endIndex === -1) return undefined;
+    const preambleRaw = await getBoundaryBlock(plugin, firstChild, REQUIRED_PREAMBLE_NAME, context);
+    const meta = parsePreambleLatexMetadata(preambleRaw);
+    return { title: meta.title, author: meta.author };
+  } catch {
+    return undefined;
+  }
+}
+
+export async function getFocusedParentRem(plugin: ReactRNPlugin): Promise<Rem> {
   const focusedRem = await plugin.focus.getFocusedRem();
   if (focusedRem) return focusedRem;
 
@@ -710,12 +1165,16 @@ async function getRemBodyText(
   plugin: ReactRNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext,
-  pinSourceLocation?: string
+  pinLocation?: Rem2TexPinLocation,
+  pinSourceDiagnostics?: { id: string; excerpt: string; title?: string }
 ): Promise<{ text: string; fromCodeBlock: boolean }> {
   const codeText = await richTextToString(plugin, rem.text, { codeOnly: true });
   const plainText = await richTextToString(plugin, rem.text, {
     hierarchyRemIds: context.hierarchyRemIds,
-    pinSourceLocation,
+    pinLocation,
+    pinSourceRemId: pinSourceDiagnostics?.id,
+    pinSourceRemExcerpt: pinSourceDiagnostics?.excerpt,
+    pinSourceRemTitle: pinSourceDiagnostics?.title,
   });
 
   // Only treat content as raw code when the code-only extraction matches
@@ -735,6 +1194,70 @@ async function getRemBodyText(
     return { text: codeText, fromCodeBlock: true };
   }
   return { text: plainText, fromCodeBlock: false };
+}
+
+async function enrichConversionErrorWithSourceRem(
+  plugin: ReactRNPlugin,
+  error: unknown,
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<unknown> {
+  if (!isRem2TexConversionError(error)) return error;
+  const e = error;
+  if (e.sourceRemId && e.sourceRemTextPreview && e.sourceRemTitle && e.sourceRemHierarchy) return e;
+
+  const fallbackTitle = (await getRemTitle(plugin, rem, context)).trim() || undefined;
+  const fallbackExcerpt = truncateDiagnosticPreview(
+    sanitizeDiagnosticExcerpt(buildDiagnosticRemTextPreview(rem.text))
+  );
+  const fallbackHierarchy = await getRelativeSourceRemHierarchy(plugin, rem, context);
+
+  return new Rem2TexConversionError({
+    code: e.code,
+    headline: e.headline,
+    whatHappened: e.whatHappened,
+    technicalDetail: e.technicalDetail,
+    location: e.location,
+    linkedRemId: e.linkedRemId,
+    sourceRemId: e.sourceRemId ?? rem._id,
+    sourceRemTextPreview: e.sourceRemTextPreview ?? fallbackExcerpt,
+    sourceRemTitle: e.sourceRemTitle ?? fallbackTitle,
+    sourceRemHierarchy: e.sourceRemHierarchy ?? fallbackHierarchy,
+    hints: e.hints,
+  });
+}
+
+async function getRelativeSourceRemHierarchy(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<string[] | undefined> {
+  const chain: Rem[] = [];
+  let current: Rem | undefined = rem;
+  while (current) {
+    chain.unshift(current);
+    if (context.rootRemId && current._id === context.rootRemId) break;
+    if (!current.parent) break;
+    current = await plugin.rem.findOne(current.parent);
+  }
+
+  let working = chain;
+  if (
+    context.rootRemId &&
+    working.length > 0 &&
+    working[0]._id === context.rootRemId
+  ) {
+    working = working.slice(1);
+  }
+
+  const parts: string[] = [];
+  for (const item of working) {
+    const label = (await getRemTitle(plugin, item, context)).trim();
+    if (label.length > 0) {
+      parts.push(label.length > 120 ? `${label.slice(0, 119)}…` : label);
+    }
+  }
+  return parts.length > 0 ? parts : undefined;
 }
 
 function hasImageTokenInRichText(element: unknown): boolean {
@@ -917,17 +1440,32 @@ async function serializeNode(
     return;
   }
 
-  const pinSourceLocation = currentSubsectionTitle
-    ? `section "${currentSectionTitle ?? 'Unknown'}", subsection "${currentSubsectionTitle}"`
+  const pinLocation: Rem2TexPinLocation | undefined = currentSubsectionTitle
+    ? { section: currentSectionTitle ?? 'Unknown', subsection: currentSubsectionTitle }
     : currentSectionTitle
-      ? `section "${currentSectionTitle}"`
+      ? { section: currentSectionTitle }
       : undefined;
-  const { text: title, fromCodeBlock } = await getRemBodyText(
-    plugin,
-    rem,
-    context,
-    pinSourceLocation
-  );
+  const sourceRemTitle = (await getRemTitle(plugin, rem, context)).trim();
+  const pinSourceDiagnostics = {
+    id: rem._id,
+    excerpt: truncateDiagnosticPreview(
+      sanitizeDiagnosticExcerpt(buildDiagnosticRemTextPreview(rem.text))
+    ),
+    title: sourceRemTitle || undefined,
+  };
+  let titleResult: { text: string; fromCodeBlock: boolean };
+  try {
+    titleResult = await getRemBodyText(
+      plugin,
+      rem,
+      context,
+      pinLocation,
+      pinSourceDiagnostics
+    );
+  } catch (error) {
+    throw await enrichConversionErrorWithSourceRem(plugin, error, rem, context);
+  }
+  const { text: title, fromCodeBlock } = titleResult;
   const headingStyle = await rem.getFontSize();
   const isHeading = headingStyle !== undefined;
 
@@ -944,15 +1482,19 @@ async function serializeNode(
     const nextSubsectionTitle =
       headingLevel === 1 ? undefined : headingLevel === 2 ? title : currentSubsectionTitle;
     for (const child of children) {
-      await serializeNode(
-        plugin,
-        child,
-        headingLevel,
-        output,
-        context,
-        nextSectionTitle,
-        nextSubsectionTitle
-      );
+      try {
+        await serializeNode(
+          plugin,
+          child,
+          headingLevel,
+          output,
+          context,
+          nextSectionTitle,
+          nextSubsectionTitle
+        );
+      } catch (error) {
+        throw await enrichConversionErrorWithSourceRem(plugin, error, child, context);
+      }
     }
     return;
   }
@@ -976,15 +1518,19 @@ async function serializeNode(
   }
 
   for (const child of nonTodoChildren) {
-    await serializeNode(
-      plugin,
-      child,
-      currentHeadingLevel,
-      output,
-      context,
-      currentSectionTitle,
-      currentSubsectionTitle
-    );
+    try {
+      await serializeNode(
+        plugin,
+        child,
+        currentHeadingLevel,
+        output,
+        context,
+        currentSectionTitle,
+        currentSubsectionTitle
+      );
+    } catch (error) {
+      throw await enrichConversionErrorWithSourceRem(plugin, error, child, context);
+    }
   }
 }
 
@@ -1007,12 +1553,18 @@ async function createOutputRem(plugin: ReactRNPlugin, parent: Rem, latex: string
   return outputTitle;
 }
 
-export async function runRem2TexConversion(plugin: ReactRNPlugin): Promise<string> {
+export async function runRem2TexConversion(
+  plugin: ReactRNPlugin,
+  options?: Rem2TexRunOptions
+): Promise<string> {
   try {
-    const parentRem = await getFocusedParentRem(plugin);
+    const parentRem = options?.parentRem ?? (await getFocusedParentRem(plugin));
+    await notifyConversionProgress(options, 1, 'Validating paper structure (Preamble / End)…');
+
     const descendants = await parentRem.getDescendants();
     const context: Rem2TexConversionContext = {
       hierarchyRemIds: new Set([parentRem._id, ...descendants.map((rem) => rem._id)]),
+      rootRemId: parentRem._id,
     };
     const children = await parentRem.getChildrenRem();
 
@@ -1038,14 +1590,22 @@ export async function runRem2TexConversion(plugin: ReactRNPlugin): Promise<strin
       throw new Error(`Could not find "${REQUIRED_END_NAME}" after "${REQUIRED_PREAMBLE_NAME}".`);
     }
 
+    await notifyConversionProgress(options, 2, 'Reading Preamble block…');
     const preamble = await getBoundaryBlock(plugin, firstChild, REQUIRED_PREAMBLE_NAME, context);
     const endRem = children[endIndex];
+
+    await notifyConversionProgress(options, 3, 'Reading End block…');
     const endBlock = await getBoundaryBlock(plugin, endRem, REQUIRED_END_NAME, context);
     const bodyRems = children.slice(1, endIndex);
 
+    await notifyConversionProgress(options, 4, 'Converting body to LaTeX…');
     const bodyLines: string[] = [];
     for (const bodyRem of bodyRems) {
-      await serializeNode(plugin, bodyRem, 0, bodyLines, context, undefined, undefined);
+      try {
+        await serializeNode(plugin, bodyRem, 0, bodyLines, context, undefined, undefined);
+      } catch (error) {
+        throw await enrichConversionErrorWithSourceRem(plugin, error, bodyRem, context);
+      }
     }
     const body = bodyLines.join('\n').trim();
 
@@ -1054,8 +1614,12 @@ export async function runRem2TexConversion(plugin: ReactRNPlugin): Promise<strin
     );
     const latex = outputLines.join('\n').trim();
 
+    await notifyConversionProgress(options, 5, 'Creating export rem…');
     return createOutputRem(plugin, parentRem, latex);
   } catch (error) {
+    if (isRem2TexConversionError(error)) {
+      throw error;
+    }
     throw new Error(normalizeUnknownError(error));
   }
 }
