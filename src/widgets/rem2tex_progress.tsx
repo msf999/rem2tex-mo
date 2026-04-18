@@ -81,6 +81,27 @@ function StatusLine(props: { text: string; tone?: 'default' | 'success' | 'error
   return <li className={`text-[13px] leading-snug ${toneClass}`}>{props.text}</li>;
 }
 
+function formatRelativeHierarchy(
+  hierarchy: string[] | undefined,
+  paperRemTitle?: string
+): string {
+  if (!hierarchy || hierarchy.length === 0) return 'Not captured';
+  let parts = [...hierarchy];
+  if (paperRemTitle && paperRemTitle.trim().length > 0) {
+    const idx = parts.findIndex((p) => p.trim() === paperRemTitle.trim());
+    if (idx >= 0) {
+      parts = parts.slice(idx + 1);
+    }
+  }
+  if (parts.length === 0) return '(paper root)';
+  return parts.join(' > ');
+}
+
+function formatHierarchyRaw(hierarchy: string[] | undefined): string {
+  if (!hierarchy || hierarchy.length === 0) return 'Not captured';
+  return hierarchy.join(' > ');
+}
+
 export const Rem2TexProgress = () => {
   const plugin = usePlugin();
   const [state] = useSessionStorageState<Rem2TexProgressUiState>(
@@ -276,11 +297,7 @@ export const Rem2TexProgress = () => {
                     ) : null}
                     <InlineRow
                       label="Hierarchy"
-                      value={
-                        state.sourceRemHierarchy && state.sourceRemHierarchy.length > 0
-                          ? state.sourceRemHierarchy.join(' > ')
-                          : 'Not captured'
-                      }
+                      value={formatRelativeHierarchy(state.sourceRemHierarchy, paperRemTitle)}
                     />
                     <InlineRow label="Source rem" value={state.sourceRemTitle || 'Not captured'} />
                     <InlineRow label="Source id" value={state.sourceRemId || 'Not captured'} />
@@ -318,6 +335,25 @@ export const Rem2TexProgress = () => {
                   </div>
                 ) : null}
               </div>
+
+              {(state.pinTargetRemTitle ||
+                (state.pinTargetRemHierarchy && state.pinTargetRemHierarchy.length > 0) ||
+                state.pinTargetRemTextPreview) && (
+                <div className={panel}>
+                  <SectionTitle title="Referenced rem missing \\label" color="text-indigo-700" />
+                  <div className="mt-2 space-y-1.5">
+                    <InlineRow label="Rem title" value={state.pinTargetRemTitle || 'Not captured'} />
+                    <InlineRow
+                      label="Hierarchy"
+                      value={formatHierarchyRaw(state.pinTargetRemHierarchy)}
+                    />
+                    <InlineRow
+                      label="Text preview"
+                      value={state.pinTargetRemTextPreview || 'Not captured'}
+                    />
+                  </div>
+                </div>
+              )}
 
               {state.hints.length > 0 && (
                 <div className={panel}>

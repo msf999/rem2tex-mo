@@ -40,14 +40,18 @@ On failure, the popup shows a **structured report**:
 - red **error summary** (headline + what happened)
 - **Where it failed** details:
   - section/subsection (when available)
-  - source rem title/id
+  - source rem title/id (the rem being exported when conversion failed)
   - source rem hierarchy path **relative to the rem where `/rem2tex` was started**
 - source rem text preview
 - technical detail
-- linked pin target rem id (when available)
+- linked pin target rem id (reference only, when available)
+- for `MISSING_LOCAL_LABEL`, an additional **Referenced rem missing `\label`** block:
+  - rem title (target rem or specific child media/code rem that needs the fix)
+  - hierarchy path to that referenced rem
+  - text/code preview for the missing-label rem (includes code block text when available)
 - actionable suggestions
 
-Use **Copy full report** to copy the plain-text failure bundle (including source rem context and relative hierarchy path) for bug reports.
+Use **Copy full report** to copy the plain-text failure bundle (including both source-rem failure context and referenced missing-label rem context) for bug reports.
 
 ## Required top-level paper structure
 

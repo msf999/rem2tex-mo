@@ -72,6 +72,10 @@ export type Rem2TexProgressUiState =
       technicalDetail?: string;
       location?: { section?: string; subsection?: string };
       linkedRemId?: string;
+      /** Referenced rem that is missing \\label (when known). */
+      pinTargetRemTitle?: string;
+      pinTargetRemHierarchy?: string[];
+      pinTargetRemTextPreview?: string;
       /** Rem whose text contained the pin (paragraph / block being exported). */
       sourceRemId?: string;
       /** Plain-text-style preview; pins shown as ⟨pin⟩, no async resolution. */
@@ -102,6 +106,10 @@ export type Rem2TexConversionErrorOptions = {
   technicalDetail?: string;
   location?: Rem2TexPinLocation;
   linkedRemId?: string;
+  /** Referenced rem that is missing \\label (when known). */
+  pinTargetRemTitle?: string;
+  pinTargetRemHierarchy?: string[];
+  pinTargetRemTextPreview?: string;
   sourceRemId?: string;
   sourceRemTextPreview?: string;
   /** Display title of the rem that contained the pin (may differ from preview text). */
@@ -119,6 +127,9 @@ export class Rem2TexConversionError extends Error {
   readonly technicalDetail?: string;
   readonly location?: Rem2TexPinLocation;
   readonly linkedRemId?: string;
+  readonly pinTargetRemTitle?: string;
+  readonly pinTargetRemHierarchy?: string[];
+  readonly pinTargetRemTextPreview?: string;
   readonly sourceRemId?: string;
   readonly sourceRemTextPreview?: string;
   readonly sourceRemTitle?: string;
@@ -137,6 +148,9 @@ export class Rem2TexConversionError extends Error {
     this.technicalDetail = opts.technicalDetail;
     this.location = opts.location;
     this.linkedRemId = opts.linkedRemId;
+    this.pinTargetRemTitle = opts.pinTargetRemTitle;
+    this.pinTargetRemHierarchy = opts.pinTargetRemHierarchy;
+    this.pinTargetRemTextPreview = opts.pinTargetRemTextPreview;
     this.sourceRemId = opts.sourceRemId;
     this.sourceRemTextPreview = opts.sourceRemTextPreview;
     this.sourceRemTitle = opts.sourceRemTitle;
@@ -209,6 +223,9 @@ export function buildProgressErrorState(
       technicalDetail: e.technicalDetail,
       location: e.location,
       linkedRemId: e.linkedRemId,
+      pinTargetRemTitle: e.pinTargetRemTitle,
+      pinTargetRemHierarchy: e.pinTargetRemHierarchy,
+      pinTargetRemTextPreview: e.pinTargetRemTextPreview,
       sourceRemId: e.sourceRemId,
       sourceRemTextPreview: e.sourceRemTextPreview,
       sourceRemTitle: e.sourceRemTitle,
@@ -278,10 +295,21 @@ function buildClipboardReportFromConversionError(
     if (e.location.subsection) lines.push(`  Subsection: ${e.location.subsection}`);
   }
   if (e.linkedRemId) {
-    lines.push('', `Pin target rem id: ${e.linkedRemId}`);
+    lines.push('', `Linked pin target rem id (reference): ${e.linkedRemId}`);
+  }
+  if (e.pinTargetRemTitle || e.pinTargetRemHierarchy || e.pinTargetRemTextPreview) {
+    lines.push('', 'Referenced rem missing \\label:');
+    if (e.pinTargetRemTitle) lines.push(`  Rem title: ${e.pinTargetRemTitle}`);
+    if (e.pinTargetRemHierarchy && e.pinTargetRemHierarchy.length > 0) {
+      lines.push(`  Hierarchy: ${e.pinTargetRemHierarchy.join(' > ')}`);
+    }
+    if (e.pinTargetRemTextPreview) {
+      lines.push('  Text preview:');
+      lines.push(`  ${e.pinTargetRemTextPreview.replace(/\n/g, ' ')}`);
+    }
   }
   if (e.sourceRemId || e.sourceRemTextPreview || e.sourceRemTitle) {
-    lines.push('', 'Source rem (where the pin appears):');
+    lines.push('', 'Source rem (where export failed):');
     if (e.sourceRemTitle) lines.push(`  Rem title: ${e.sourceRemTitle}`);
     if (e.sourceRemHierarchy && e.sourceRemHierarchy.length > 0) {
       lines.push(`  Hierarchy: ${e.sourceRemHierarchy.join(' > ')}`);
@@ -652,6 +680,7 @@ function escapeLatex(text: string): string {
 type FlattenOptions = {
   codeOnly?: boolean;
   hierarchyRemIds?: Set<string>;
+  rootRemId?: string;
   suppressExternalCitationWrap?: boolean;
   /** Where the pin appears in the paper outline (for error reporting). */
   pinLocation?: Rem2TexPinLocation;
@@ -949,19 +978,46 @@ async function flattenRichTextElement(
         return '';
       }
 
-      const missingInfoError = await getLocalPinMissingInfoError(plugin, linkedRem);
-      if (missingInfoError) {
+      const missingLabelDiagnostics = await getLocalPinMissingLabelDiagnostics(plugin, linkedRem);
+      if (missingLabelDiagnostics) {
+        const sourceRem = options.pinSourceRemId
+          ? await plugin.rem.findOne(options.pinSourceRemId)
+          : undefined;
+        const sourceTitle = options.pinSourceRemTitle?.trim() || undefined;
+        const sourceExcerpt = options.pinSourceRemExcerpt?.trim() || undefined;
+        const sourceHierarchy = sourceRem
+          ? await getRelativeHierarchyFromFlattenOptions(plugin, sourceRem, options)
+          : undefined;
+        const targetRem = missingLabelDiagnostics.missingRem;
+        const targetTitle =
+          flattenRawTitleText(targetRem.text).trim() ||
+          (
+            await richTextToString(plugin, targetRem.text, {
+              hierarchyRemIds: options.hierarchyRemIds,
+              rootRemId: options.rootRemId,
+            })
+          ).trim();
+        const targetExcerpt = truncateDiagnosticPreview(sanitizeDiagnosticExcerpt(
+          missingLabelDiagnostics.missingCodeText ??
+            buildDiagnosticRemTextPreview(targetRem.text)
+        ));
+        const targetHierarchy = await getRelativeHierarchyFromFlattenOptions(plugin, targetRem, options);
         throw new Rem2TexConversionError({
           code: 'MISSING_LOCAL_LABEL',
           headline: 'Pin needs a LaTeX \\label in the target figure/table/code',
           whatHappened:
             'This paragraph contains a rem link (pin) to local media (a code block or image rem) inside your paper. Rem2Tex turns that into \\ref{…}, but the exported LaTeX must include \\label{…} so the reference key exists.',
-          technicalDetail: missingInfoError,
+          technicalDetail: missingLabelDiagnostics.message,
           location: options.pinLocation,
           linkedRemId: entry._id,
+          pinTargetRemTitle: targetTitle || undefined,
+          pinTargetRemHierarchy: targetHierarchy,
+          pinTargetRemTextPreview: targetExcerpt,
+          // "Where it failed" is the rem being exported that contains the pin.
           sourceRemId: options.pinSourceRemId,
-          sourceRemTextPreview: options.pinSourceRemExcerpt,
-          sourceRemTitle: options.pinSourceRemTitle,
+          sourceRemTextPreview: sourceExcerpt,
+          sourceRemTitle: sourceTitle,
+          sourceRemHierarchy: sourceHierarchy,
           hints: [
             'Open the rem you linked to and add \\label{your-key} inside the figure, table, or equation LaTeX (same child code block Rem2Tex exports).',
             'For image rems, the \\label must live in a child code block under the image (figure/table environment), not only in the image caption rem text.',
@@ -1136,15 +1192,22 @@ export async function getFocusedParentRem(plugin: ReactRNPlugin): Promise<Rem> {
 
   const selected = await plugin.editor.getSelectedRem();
   const selectedRemId = selected?.remIds?.[0];
-  if (!selectedRemId) {
-    throw new Error('No focused rem found. Focus the Paper rem before running Rem2Tex.');
+  if (selectedRemId) {
+    const selectedRem = await plugin.rem.findOne(selectedRemId);
+    if (!selectedRem) {
+      throw new Error('The selected rem is not accessible to this plugin.');
+    }
+    return selectedRem;
   }
 
-  const selectedRem = await plugin.rem.findOne(selectedRemId);
-  if (!selectedRem) {
-    throw new Error('The selected rem is not accessible to this plugin.');
+  const focusedPaneId = await plugin.window.getFocusedPaneId();
+  const paneRemId = await plugin.window.getOpenPaneRemId(focusedPaneId);
+  if (paneRemId) {
+    const paneRem = await plugin.rem.findOne(paneRemId);
+    if (paneRem) return paneRem;
   }
-  return selectedRem;
+
+  throw new Error('No focused rem found. Open or focus the Paper rem before running Rem2Tex.');
 }
 
 async function todoComment(
@@ -1171,6 +1234,7 @@ async function getRemBodyText(
   const codeText = await richTextToString(plugin, rem.text, { codeOnly: true });
   const plainText = await richTextToString(plugin, rem.text, {
     hierarchyRemIds: context.hierarchyRemIds,
+    rootRemId: context.rootRemId,
     pinLocation,
     pinSourceRemId: pinSourceDiagnostics?.id,
     pinSourceRemExcerpt: pinSourceDiagnostics?.excerpt,
@@ -1206,7 +1270,8 @@ async function enrichConversionErrorWithSourceRem(
   const e = error;
   if (e.sourceRemId && e.sourceRemTextPreview && e.sourceRemTitle && e.sourceRemHierarchy) return e;
 
-  const fallbackTitle = (await getRemTitle(plugin, rem, context)).trim() || undefined;
+  const fallbackTitle =
+    flattenRawTitleText(rem.text).trim() || (await getRemTitle(plugin, rem, context)).trim() || undefined;
   const fallbackExcerpt = truncateDiagnosticPreview(
     sanitizeDiagnosticExcerpt(buildDiagnosticRemTextPreview(rem.text))
   );
@@ -1219,6 +1284,9 @@ async function enrichConversionErrorWithSourceRem(
     technicalDetail: e.technicalDetail,
     location: e.location,
     linkedRemId: e.linkedRemId,
+    pinTargetRemTitle: e.pinTargetRemTitle,
+    pinTargetRemHierarchy: e.pinTargetRemHierarchy,
+    pinTargetRemTextPreview: e.pinTargetRemTextPreview,
     sourceRemId: e.sourceRemId ?? rem._id,
     sourceRemTextPreview: e.sourceRemTextPreview ?? fallbackExcerpt,
     sourceRemTitle: e.sourceRemTitle ?? fallbackTitle,
@@ -1252,7 +1320,42 @@ async function getRelativeSourceRemHierarchy(
 
   const parts: string[] = [];
   for (const item of working) {
-    const label = (await getRemTitle(plugin, item, context)).trim();
+    const label = flattenRawTitleText(item.text).trim() || (await getRemTitle(plugin, item, context)).trim();
+    if (label.length > 0) {
+      parts.push(label.length > 120 ? `${label.slice(0, 119)}…` : label);
+    }
+  }
+  return parts.length > 0 ? parts : undefined;
+}
+
+async function getRelativeHierarchyFromFlattenOptions(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  options: FlattenOptions
+): Promise<string[] | undefined> {
+  const chain: Rem[] = [];
+  let current: Rem | undefined = rem;
+  while (current) {
+    chain.unshift(current);
+    if (options.rootRemId && current._id === options.rootRemId) break;
+    if (!current.parent) break;
+    current = await plugin.rem.findOne(current.parent);
+  }
+
+  let working = chain;
+  if (
+    options.rootRemId &&
+    working.length > 0 &&
+    working[0]._id === options.rootRemId
+  ) {
+    working = working.slice(1);
+  }
+
+  const parts: string[] = [];
+  for (const item of working) {
+    const label =
+      flattenRawTitleText(item.text).trim() ||
+      (await richTextToString(plugin, item.text, { hierarchyRemIds: options.hierarchyRemIds })).trim();
     if (label.length > 0) {
       parts.push(label.length > 120 ? `${label.slice(0, 119)}…` : label);
     }
@@ -1324,6 +1427,35 @@ async function getMediaCodeBlocksFromImmediateChildren(
   return blocks;
 }
 
+type MediaCodeBlockWithOwner = {
+  ownerRem: Rem;
+  latex: string;
+};
+
+async function getMediaCodeBlocksWithOwnerFromImmediateChildren(
+  plugin: ReactRNPlugin,
+  rem: Rem
+): Promise<MediaCodeBlockWithOwner[]> {
+  const children = await rem.getChildrenRem();
+  const blocks: MediaCodeBlockWithOwner[] = [];
+
+  for (const child of children) {
+    const fromText = await richTextToString(plugin, child.text, { codeOnly: true });
+    const sanitizedFromText = fromText ? stripTrailingCodeMetadataArtifacts(fromText) : '';
+    if (sanitizedFromText && inferMediaTypeFromLatex(sanitizedFromText)) {
+      blocks.push({ ownerRem: child, latex: sanitizedFromText });
+    }
+
+    const fromBackText = await richTextToString(plugin, child.backText, { codeOnly: true });
+    const sanitizedFromBackText = fromBackText ? stripTrailingCodeMetadataArtifacts(fromBackText) : '';
+    if (sanitizedFromBackText && inferMediaTypeFromLatex(sanitizedFromBackText)) {
+      blocks.push({ ownerRem: child, latex: sanitizedFromBackText });
+    }
+  }
+
+  return blocks;
+}
+
 async function getCodeBlockTextFromRem(plugin: ReactRNPlugin, rem: Rem): Promise<string | undefined> {
   const fromText = await richTextToString(plugin, rem.text, { codeOnly: true });
   const sanitizedFromText = fromText ? stripTrailingCodeMetadataArtifacts(fromText) : '';
@@ -1359,24 +1491,47 @@ async function resolveLocalPinAsRef(plugin: ReactRNPlugin, rem: Rem): Promise<st
   return undefined;
 }
 
-async function getLocalPinMissingInfoError(plugin: ReactRNPlugin, rem: Rem): Promise<string | undefined> {
+type LocalPinMissingLabelDiagnostics = {
+  message: string;
+  /** The specific rem that must be edited (code block rem, or image rem if no child exists). */
+  missingRem: Rem;
+  /** Exact LaTeX block missing \\label when available. */
+  missingCodeText?: string;
+};
+
+async function getLocalPinMissingLabelDiagnostics(
+  plugin: ReactRNPlugin,
+  rem: Rem
+): Promise<LocalPinMissingLabelDiagnostics | undefined> {
   const directCode = await getCodeBlockTextFromRem(plugin, rem);
   if (directCode) {
     if (!extractLabelKeyFromLatex(directCode)) {
-      return 'Pinned local code block is missing \\label{...}.';
+      return {
+        message: 'Pinned local code block is missing \\label{...}.',
+        missingRem: rem,
+        missingCodeText: directCode,
+      };
     }
     return undefined;
   }
 
   const isImageRem = hasImageTokenInRichText(rem.text) || hasImageTokenInRichText(rem.backText);
   if (isImageRem) {
-    const mediaBlocks = await getMediaCodeBlocksFromImmediateChildren(plugin, rem);
+    const mediaBlocks = await getMediaCodeBlocksWithOwnerFromImmediateChildren(plugin, rem);
     if (mediaBlocks.length === 0) {
-      return 'Pinned local image rem is missing a child media code block.';
+      return {
+        message: 'Pinned local image rem is missing a child media code block.',
+        missingRem: rem,
+      };
     }
-    const hasLabel = mediaBlocks.some((block) => Boolean(extractLabelKeyFromLatex(block)));
+    const hasLabel = mediaBlocks.some((block) => Boolean(extractLabelKeyFromLatex(block.latex)));
     if (!hasLabel) {
-      return 'Pinned local image media code block is missing \\label{...}.';
+      const unlabeledBlock = mediaBlocks.find((block) => !extractLabelKeyFromLatex(block.latex));
+      return {
+        message: 'Pinned local image media code block is missing \\label{...}.',
+        missingRem: unlabeledBlock?.ownerRem ?? rem,
+        missingCodeText: unlabeledBlock?.latex,
+      };
     }
   }
 
