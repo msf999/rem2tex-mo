@@ -1265,7 +1265,8 @@ async function todoComment(
     hierarchyRemIds: context.hierarchyRemIds,
     todoContentResolvePinsAsText: true,
   });
-  return text ? `% TODO ${marker} ${text}` : `% TODO ${marker}`;
+  const cleaned = stripTodoCommentArtifactCitations(text);
+  return cleaned ? `% TODO ${marker} ${cleaned}` : `% TODO ${marker}`;
 }
 
 async function shouldExportTodoAsComment(
@@ -1279,18 +1280,38 @@ async function shouldExportTodoAsComment(
   return status !== 'Finished';
 }
 
-const TODO_COMMENT_INDENT_STEP = 2;
+/** Spaces before each `%` per nesting depth (depth 1 = first level under root todo). */
+const TODO_COMMENT_DEPTH_SPACES = 1;
 const TODO_COMMENT_LABEL_MAX = 240;
+
+/** RemNote todo status pins often serialize as `\\cite{Status}`; strip from comment-only output. */
+function stripTodoCommentArtifactCitations(text: string): string {
+  return text
+    .replace(/\\cite\{Status\}/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
 
 async function getCommentTreeLabel(
   plugin: ReactRNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<string> {
-  const raw = flattenRawTitleText(rem.text).trim() || (await getRemTitle(plugin, rem, context)).trim();
+  let raw = flattenRawTitleText(rem.text).trim();
+  if (!raw) {
+    const diag = sanitizeDiagnosticExcerpt(buildDiagnosticRemTextPreview(rem.text));
+    if (isPinOnlyDiagnosticPreview(diag)) return '';
+    raw = diag.replace(/\s+/g, ' ').trim();
+  }
+  raw = stripTodoCommentArtifactCitations(raw);
   const single = raw.replace(/\s+/g, ' ').trim();
-  if (single.length <= TODO_COMMENT_LABEL_MAX) return single || '—';
+  if (!single) return '';
+  if (single.length <= TODO_COMMENT_LABEL_MAX) return single;
   return `${single.slice(0, TODO_COMMENT_LABEL_MAX - 1)}…`;
+}
+
+function leadingSpacesForTodoCommentDepth(depth: number): string {
+  return ' '.repeat(Math.max(0, depth) * TODO_COMMENT_DEPTH_SPACES);
 }
 
 /** Indented full `todoComment` block (Option B for nested todos). */
@@ -1299,14 +1320,14 @@ async function emitIndentedTodoCommentBlock(
   rem: Rem,
   output: string[],
   context: Rem2TexConversionContext,
-  indentDepth: number
+  depth: number
 ): Promise<void> {
   const raw = await todoComment(plugin, rem, context);
   const lines = raw.split(/\r?\n/);
-  const pad = ' '.repeat(indentDepth);
+  const lead = leadingSpacesForTodoCommentDepth(depth);
   for (const line of lines) {
     const rest = line.startsWith('%') ? line.slice(1) : line;
-    output.push(`%${pad}${rest}`);
+    output.push(`${lead}%${rest}`);
   }
 }
 
@@ -1316,33 +1337,27 @@ async function emitTodoChildrenAsCommentTree(
   parentRem: Rem,
   output: string[],
   context: Rem2TexConversionContext,
-  indentDepth: number
+  depth: number
 ): Promise<void> {
   const children = await parentRem.getChildrenRem();
-  const pad = ' '.repeat(indentDepth);
+  const lead = leadingSpacesForTodoCommentDepth(depth);
   for (const child of children) {
+    if (await isTodoHeadingMetadataChild(child)) {
+      continue;
+    }
     const childIsHeading = (await child.getFontSize()) !== undefined;
     const childIsTodo = await child.isTodo();
     if (childIsTodo && !childIsHeading) {
       if (await shouldExportTodoAsComment(child, context)) {
-        await emitIndentedTodoCommentBlock(plugin, child, output, context, indentDepth);
-        await emitTodoChildrenAsCommentTree(
-          plugin,
-          child,
-          output,
-          context,
-          indentDepth + TODO_COMMENT_INDENT_STEP
-        );
+        await emitIndentedTodoCommentBlock(plugin, child, output, context, depth);
+        await emitTodoChildrenAsCommentTree(plugin, child, output, context, depth + 1);
       }
     } else {
-      output.push(`%${pad}- ${await getCommentTreeLabel(plugin, child, context)}`);
-      await emitTodoChildrenAsCommentTree(
-        plugin,
-        child,
-        output,
-        context,
-        indentDepth + TODO_COMMENT_INDENT_STEP
-      );
+      const label = await getCommentTreeLabel(plugin, child, context);
+      if (label.length > 0) {
+        output.push(`${lead}%  - ${label}`);
+      }
+      await emitTodoChildrenAsCommentTree(plugin, child, output, context, depth + 1);
     }
   }
 }
@@ -1700,7 +1715,7 @@ async function serializeNode(
   if (isTodo && !isHeading) {
     if (await shouldExportTodoAsComment(rem, context)) {
       output.push(await todoComment(plugin, rem, context));
-      await emitTodoChildrenAsCommentTree(plugin, rem, output, context, TODO_COMMENT_INDENT_STEP);
+      await emitTodoChildrenAsCommentTree(plugin, rem, output, context, 1);
     }
     return;
   }
@@ -1803,7 +1818,7 @@ async function serializeNode(
     if ((await child.isTodo()) && !childIsHeading) {
       if (await shouldExportTodoAsComment(child, context)) {
         output.push(await todoComment(plugin, child, context));
-        await emitTodoChildrenAsCommentTree(plugin, child, output, context, TODO_COMMENT_INDENT_STEP);
+        await emitTodoChildrenAsCommentTree(plugin, child, output, context, 1);
       }
     } else {
       nonTodoChildren.push(child);

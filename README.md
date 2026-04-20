@@ -96,12 +96,14 @@ TODO export is command-dependent:
 
 If a rem is both a **heading and a todo**, it is treated as a heading only (todo status is ignored for section output).
 
-**Indented TODO subtrees:** When a non-heading todo is exported as a comment, its **child rems** are also emitted as `%` comment lines below it, indented to show outline depth:
+**Indented TODO subtrees:** When a non-heading todo is exported as a comment, its **child rems** are also emitted as `%` comment lines below it. **Indentation** follows outline depth with **one leading space per level** before the `%` (the whole line shifts right, not only the text after `%`).
 
-- Non-todo children: one line each, `%` + spaces + `- ` + a short title (from the rem’s title/text).
+- Non-todo children: one line each, indented `%  - ` plus a short title (from the rem’s title/text).
 - Nested todo children: the full `% TODO [ ] …` / `% TODO [X] …` line for that child is emitted at the deeper indent (then its own descendants continue underneath).
 
-**Pins inside `% TODO …` lines:** Rem2Tex uses a dedicated “resolve pins as readable text” path for todo comments. Local pins therefore show as **linked visible text**, not as `\ref{...}` (even when the same pin would become `\ref{...}` in normal paragraph output). External pins still become `\cite{...}` when they point outside the export hierarchy. The rule that **omits** local pins to other TODO rems in normal paragraphs does **not** apply inside exported TODO comment lines.
+**Todo status artifact:** RemNote often surfaces the checkbox state as a pin that serializes as `\cite{Status}`. That fragment is **stripped** from exported `% TODO …` lines and from subtree comment labels so it never appears in the TeX.
+
+**Pins inside `% TODO …` lines:** Rem2Tex uses a dedicated “resolve pins as readable text” path for todo comments. Local pins therefore show as **linked visible text**, not as `\ref{...}` (even when the same pin would become `\ref{...}` in normal paragraph output). External pins still become `\cite{...}` when they point outside the export hierarchy (in addition to Status being stripped as above). The rule that **omits** local pins to other TODO rems in normal paragraphs does **not** apply inside exported TODO comment lines.
 
 ## Preamble and End extraction
 
