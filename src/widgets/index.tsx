@@ -17,6 +17,7 @@ import {
   type Rem2TexProgressUiState,
   REM2TEX_PROGRESS_STORAGE_KEY,
   REM2TEX_PROGRESS_TOTAL,
+  runParagraphToTexConversion,
   runRem2TexConversion,
 } from '../lib/rem2tex';
 
@@ -157,6 +158,23 @@ async function onActivate(plugin: ReactRNPlugin) {
     description: 'Convert a Paper rem tree into LaTeX and skip todo comment output.',
     quickCode: 'rem2tex-no-todos',
     action: async () => runExportWithTodoMode('none'),
+  });
+
+  await plugin.app.registerCommand({
+    id: 'rem2tex-paragraph-to-tex',
+    name: 'Rem2Tex: Paragraph to TeX',
+    description:
+      'Convert the focused rem (and its descendants) to LaTeX using the same rules as paper body text. All todos are copied as `% TODO ...` comments. Inserts a child export with a LaTeX code block.',
+    quickCode: 'rem2tex-paragraph',
+    action: async () => {
+      try {
+        const title = await runParagraphToTexConversion(plugin);
+        await plugin.app.toast(`Rem2Tex: added “${title}” with LaTeX under this rem.`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await plugin.app.toast(`Rem2Tex paragraph export failed: ${message}`);
+      }
+    },
   });
 
   await plugin.app.toast('Rem2Tex loaded. Type /rem2tex on a parent Rem to export.');

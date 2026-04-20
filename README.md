@@ -26,10 +26,17 @@ The plugin registers:
 - `Rem2Tex: Convert Paper to TeX (Copy All Todos as Comments)` (`/rem2tex`)
 - `Rem2Tex: Convert Paper to TeX (Copy Unfinished Todos as Comments)` (`/rem2tex-unfinished`)
 - `Rem2Tex: Convert Paper to TeX (Do Not Copy Todos as Comments)` (`/rem2tex-no-todos`)
+- `Rem2Tex: Paragraph to TeX` (`/rem2tex-paragraph`)
 
-Run it while focused on the parent rem you want to export.
+Run paper commands while focused on the **paper root** rem you want to export.
 
-During conversion, Rem2Tex opens a **large popup** with a single scrolling document-style layout:
+### Paragraph to TeX (`/rem2tex-paragraph`)
+
+Use this on **any** focused rem (not only a paper root). Rem2Tex serializes **that rem and its descendants** with the **same rules as paper body conversion** (headings, images, paragraphs, `% TODO …` comment trees, etc.). **Finished and unfinished todos** are always included as comments (equivalent to “copy all todos”).
+
+It creates a **direct child** of the source rem named `Rem2Tex paragraph HH:MM AM/PM DD-MM-YYYY`, with a **nested** LaTeX code block rem under it (same two-level shape as full paper exports). Earlier paragraph exports under the same rem are **not** re-included when you run the command again. This command does **not** open the progress popup; success or failure is shown in a **toast**.
+
+During conversion, the **paper** commands open a **large popup** with a single scrolling document-style layout:
 
 - **From preamble** section (inline `Title`, `Author(s)`, and `Paper rem`)
 - **Todos** section (shows the active policy: all / unfinished-only / none)

@@ -10,6 +10,11 @@ export type Rem2TexConversionContext = {
   rootRemId?: string;
   /** Controls whether todos are emitted as `% TODO ...` comments. */
   todoExportMode?: Rem2TexTodoExportMode;
+  /**
+   * Rem IDs whose subtrees are skipped during serialization (e.g. prior “paragraph export”
+   * nodes stored under the source rem so they are not re-emitted as body text).
+   */
+  skipRemSubtreeIds?: Set<string>;
 };
 
 /** Session key for Rem2Tex popup progress UI (`rem2tex_progress.tsx`). */
@@ -386,6 +391,11 @@ export type Rem2TexRunOptions = {
   onProgress?: (step: number, total: number, label: string) => void | Promise<void>;
 };
 
+export type Rem2TexParagraphRunOptions = {
+  /** Rem to convert; defaults to the focused / selected rem. */
+  paragraphRem?: Rem;
+};
+
 async function notifyConversionProgress(
   options: Rem2TexRunOptions | undefined,
   step: number,
@@ -466,6 +476,49 @@ function toOutputTimestamp(now: Date = new Date()): string {
   const hours12 = hours24 % 12 || 12;
   const hours = String(hours12).padStart(2, '0');
   return `${hours}:${minutes} ${meridiem} ${day}-${month}-${year}`;
+}
+
+/** Direct child rems created by “Paragraph to TeX” (title + code subtree). */
+function isParagraphExportRootRem(rem: Rem): boolean {
+  const t = flattenRawTitleText(rem.text).trim();
+  return /^Rem2Tex paragraph\b/i.test(t);
+}
+
+async function collectParagraphExportSkipRemIds(paragraphRem: Rem): Promise<Set<string>> {
+  const skip = new Set<string>();
+  const children = await paragraphRem.getChildrenRem();
+  for (const child of children) {
+    if (!isParagraphExportRootRem(child)) continue;
+    skip.add(child._id);
+    for (const d of await child.getDescendants()) {
+      skip.add(d._id);
+    }
+  }
+  return skip;
+}
+
+/** Same shape as full-paper export: titled rem + LaTeX code child. */
+async function createParagraphLatexExport(
+  plugin: ReactRNPlugin,
+  paragraphRem: Rem,
+  latex: string
+): Promise<string> {
+  const outputTitle = `Rem2Tex paragraph ${toOutputTimestamp()}`;
+  const outputRem = await plugin.rem.createRem();
+  if (!outputRem) {
+    throw new Error('Failed to create paragraph export rem.');
+  }
+  await outputRem.setText([outputTitle]);
+  await outputRem.setParent(paragraphRem);
+
+  const codeRem = await plugin.rem.createRem();
+  if (!codeRem) {
+    throw new Error('Failed to create paragraph export code rem.');
+  }
+  await codeRem.setParent(outputRem);
+  await codeRem.setText(await plugin.richText.code(latex, 'latex').value());
+
+  return outputTitle;
 }
 
 function isEscaped(text: string, index: number): boolean {
@@ -1708,6 +1761,10 @@ async function serializeNode(
   currentSectionTitle?: string,
   currentSubsectionTitle?: string
 ): Promise<void> {
+  if (context.skipRemSubtreeIds?.has(rem._id)) {
+    return;
+  }
+
   const headingStyle = await rem.getFontSize();
   const isHeading = headingStyle !== undefined;
   const isTodo = await rem.isTodo();
@@ -1951,6 +2008,43 @@ export async function runRem2TexConversion(
 
     await notifyConversionProgress(options, 5, 'Creating export rem…');
     return createOutputRem(plugin, parentRem, latex);
+  } catch (error) {
+    if (isRem2TexConversionError(error)) {
+      throw error;
+    }
+    throw new Error(normalizeUnknownError(error));
+  }
+}
+
+/**
+ * Serialize a single rem subtree (same rules as paper body conversion). Finished and unfinished
+ * todos are always emitted as `% TODO …` comments. Writes a new export (titled rem + LaTeX code
+ * child) under the source rem; prior `Rem2Tex paragraph …` exports are not re-included in output.
+ */
+export async function runParagraphToTexConversion(
+  plugin: ReactRNPlugin,
+  options?: Rem2TexParagraphRunOptions
+): Promise<string> {
+  try {
+    const paragraphRem = options?.paragraphRem ?? (await getFocusedParentRem(plugin));
+    const descendants = await paragraphRem.getDescendants();
+    const skipRemSubtreeIds = await collectParagraphExportSkipRemIds(paragraphRem);
+    const context: Rem2TexConversionContext = {
+      hierarchyRemIds: new Set([paragraphRem._id, ...descendants.map((r) => r._id)]),
+      rootRemId: paragraphRem._id,
+      todoExportMode: 'all',
+      skipRemSubtreeIds,
+    };
+
+    const lines: string[] = [];
+    try {
+      await serializeNode(plugin, paragraphRem, 0, lines, context, undefined, undefined);
+    } catch (error) {
+      throw await enrichConversionErrorWithSourceRem(plugin, error, paragraphRem, context);
+    }
+
+    const latex = lines.join('\n').trim();
+    return createParagraphLatexExport(plugin, paragraphRem, latex);
   } catch (error) {
     if (isRem2TexConversionError(error)) {
       throw error;
