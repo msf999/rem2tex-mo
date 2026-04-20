@@ -1279,6 +1279,74 @@ async function shouldExportTodoAsComment(
   return status !== 'Finished';
 }
 
+const TODO_COMMENT_INDENT_STEP = 2;
+const TODO_COMMENT_LABEL_MAX = 240;
+
+async function getCommentTreeLabel(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<string> {
+  const raw = flattenRawTitleText(rem.text).trim() || (await getRemTitle(plugin, rem, context)).trim();
+  const single = raw.replace(/\s+/g, ' ').trim();
+  if (single.length <= TODO_COMMENT_LABEL_MAX) return single || '—';
+  return `${single.slice(0, TODO_COMMENT_LABEL_MAX - 1)}…`;
+}
+
+/** Indented full `todoComment` block (Option B for nested todos). */
+async function emitIndentedTodoCommentBlock(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  output: string[],
+  context: Rem2TexConversionContext,
+  indentDepth: number
+): Promise<void> {
+  const raw = await todoComment(plugin, rem, context);
+  const lines = raw.split(/\r?\n/);
+  const pad = ' '.repeat(indentDepth);
+  for (const line of lines) {
+    const rest = line.startsWith('%') ? line.slice(1) : line;
+    output.push(`%${pad}${rest}`);
+  }
+}
+
+/** Emit direct children of a todo rem as indented `%` comment lines and recurse. */
+async function emitTodoChildrenAsCommentTree(
+  plugin: ReactRNPlugin,
+  parentRem: Rem,
+  output: string[],
+  context: Rem2TexConversionContext,
+  indentDepth: number
+): Promise<void> {
+  const children = await parentRem.getChildrenRem();
+  const pad = ' '.repeat(indentDepth);
+  for (const child of children) {
+    const childIsHeading = (await child.getFontSize()) !== undefined;
+    const childIsTodo = await child.isTodo();
+    if (childIsTodo && !childIsHeading) {
+      if (await shouldExportTodoAsComment(child, context)) {
+        await emitIndentedTodoCommentBlock(plugin, child, output, context, indentDepth);
+        await emitTodoChildrenAsCommentTree(
+          plugin,
+          child,
+          output,
+          context,
+          indentDepth + TODO_COMMENT_INDENT_STEP
+        );
+      }
+    } else {
+      output.push(`%${pad}- ${await getCommentTreeLabel(plugin, child, context)}`);
+      await emitTodoChildrenAsCommentTree(
+        plugin,
+        child,
+        output,
+        context,
+        indentDepth + TODO_COMMENT_INDENT_STEP
+      );
+    }
+  }
+}
+
 async function getRemBodyText(
   plugin: ReactRNPlugin,
   rem: Rem,
@@ -1632,6 +1700,7 @@ async function serializeNode(
   if (isTodo && !isHeading) {
     if (await shouldExportTodoAsComment(rem, context)) {
       output.push(await todoComment(plugin, rem, context));
+      await emitTodoChildrenAsCommentTree(plugin, rem, output, context, TODO_COMMENT_INDENT_STEP);
     }
     return;
   }
@@ -1734,6 +1803,7 @@ async function serializeNode(
     if ((await child.isTodo()) && !childIsHeading) {
       if (await shouldExportTodoAsComment(child, context)) {
         output.push(await todoComment(plugin, child, context));
+        await emitTodoChildrenAsCommentTree(plugin, child, output, context, TODO_COMMENT_INDENT_STEP);
       }
     } else {
       nonTodoChildren.push(child);

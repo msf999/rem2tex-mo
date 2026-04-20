@@ -37,25 +37,6 @@ async function openOrReplaceRem2TexProgressPopup(plugin: ReactRNPlugin): Promise
 }
 
 async function onActivate(plugin: ReactRNPlugin) {
-  // Register settings
-  await plugin.settings.registerStringSetting({
-    id: 'name',
-    title: 'What is your Name?',
-    defaultValue: 'Bob',
-  });
-
-  await plugin.settings.registerBooleanSetting({
-    id: 'pizza',
-    title: 'Do you like pizza?',
-    defaultValue: true,
-  });
-
-  await plugin.settings.registerNumberSetting({
-    id: 'favorite-number',
-    title: 'What is your favorite number?',
-    defaultValue: 42,
-  });
-
   await plugin.app.registerWidget('rem2tex_progress', WidgetLocation.Popup, {
     dimensions: {
       width: REM2TEX_PROGRESS_POPUP_PX.width,
@@ -99,7 +80,7 @@ async function onActivate(plugin: ReactRNPlugin) {
           startedAtIso,
           preambleTitle,
           preambleAuthor,
-              todoExportMode,
+          todoExportMode,
           progressLog: [],
         });
         await openOrReplaceRem2TexProgressPopup(plugin);
@@ -178,13 +159,7 @@ async function onActivate(plugin: ReactRNPlugin) {
     action: async () => runExportWithTodoMode('none'),
   });
 
-  // Show a toast notification to the user.
   await plugin.app.toast('Rem2Tex loaded. Type /rem2tex on a parent Rem to export.');
-
-  // Register a sidebar widget.
-  await plugin.app.registerWidget('sample_widget', WidgetLocation.RightSidebar, {
-    dimensions: { height: 'auto', width: '100%' },
-  });
 }
 
 async function onDeactivate(_: ReactRNPlugin) {}

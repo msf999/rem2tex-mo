@@ -96,7 +96,12 @@ TODO export is command-dependent:
 
 If a rem is both a **heading and a todo**, it is treated as a heading only (todo status is ignored for section output).
 
-Pins and rem references **in exported TODO comment text** are resolved like normal body text (linked text, external `\cite{...}`, local `\ref{...}` when applicable). That differs from **regular paragraphs**: a local pin that points at another TODO rem in the export tree is omitted in paragraph output so checklist links do not pollute prose, but that omission rule does not apply inside exported TODO comment lines.
+**Indented TODO subtrees:** When a non-heading todo is exported as a comment, its **child rems** are also emitted as `%` comment lines below it, indented to show outline depth:
+
+- Non-todo children: one line each, `%` + spaces + `- ` + a short title (from the rem’s title/text).
+- Nested todo children: the full `% TODO [ ] …` / `% TODO [X] …` line for that child is emitted at the deeper indent (then its own descendants continue underneath).
+
+**Pins inside `% TODO …` lines:** Rem2Tex uses a dedicated “resolve pins as readable text” path for todo comments. Local pins therefore show as **linked visible text**, not as `\ref{...}` (even when the same pin would become `\ref{...}` in normal paragraph output). External pins still become `\cite{...}` when they point outside the export hierarchy. The rule that **omits** local pins to other TODO rems in normal paragraphs does **not** apply inside exported TODO comment lines.
 
 ## Preamble and End extraction
 
@@ -139,6 +144,8 @@ If an image rem has no valid child media code block:
 
 Standalone media blocks (e.g. table/figure LaTeX in a non-image rem) are supported through normal code-aware conversion paths and are emitted as raw LaTeX when the rem is truly code-formatted.
 
+**Body rems vs boundary blocks:** For ordinary body rems, code detection uses the rem’s **main text** (`rem.text`) only. `Preamble` / `End` extraction (and some media paths) can also read **back text** (`backText`); if you rely on code in `backText` for a normal paragraph rem, move it into the main text or a child code block.
+
 ## Math and LaTeX escaping behavior
 
 Rem2Tex applies context-aware escaping to protect normal prose while preserving LaTeX syntax.
@@ -171,7 +178,7 @@ Inside math environments (`equation`, `align`, `gather`, `multline`, and starred
 For normal text extraction:
 
 - rem reference tokens are context-aware
-- if a pin/reference points inside the current export hierarchy, it usually resolves as linked text, `\ref{...}` for labeled local figures/tables/code, or is omitted when it points at another TODO rem (see **TODO rem handling** above—omission does not apply to pins inside a TODO rem’s text)
+- if a pin/reference points inside the current export hierarchy, it usually resolves as linked text, `\ref{...}` for labeled local figures/tables/code, or is omitted when it points at another TODO rem in **paragraph** body text (see **TODO rem handling**—exported `% TODO …` lines and todo comment subtrees use different pin rules)
 - if a pin/reference points outside the current export hierarchy, it is converted to a citation key
   derived from the first document ancestor and emitted as `\cite{...}`
 - query-like payload artifacts (e.g. segments beginning with `query:`) are suppressed and not emitted
@@ -234,6 +241,11 @@ To get stable output:
   - `Rem2Tex`
     - `Rem2Tex 09:42 AM 18-04-2026` (auto-generated export)
     - `Rem2Tex 11:05 AM 19-04-2026` (auto-generated export)
+
+## Development
+
+- The npm package name is `rem2tex-mo` (see `package.json`).
+- Build for RemNote: `npm install` then `npm run build` — produces `PluginZip.zip` in the project root for sideloading.
 
 ## Notes
 
