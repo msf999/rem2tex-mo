@@ -129,5 +129,30 @@ export async function run(): Promise<number> {
   t.equal('old paragraph export and a misplaced Rem2Tex folder are skipped', captured.latex, 'P\n\n\\section{Section}\n\nreal prose\n\nE');
   t.check('log counts the skipped output rems', res7.status === 'success' && /Earlier Rem2Tex export rems found inside the body and skipped: 2/.test(captured.log), captured.log);
 
+  // 8. silently lost content is warned about (item 5): image-rem children, todo skipped by the mode
+  const p8 = mk('p8', ['Paper 8'], null);
+  mk('p8pre', ['Preamble'], 'p8');
+  mk('p8pre1', [code('P')], 'p8pre');
+  mk('p8img', [{ i: 'i', url: 'x.png' }], 'p8');
+  mk('p8fig', [code('\\begin{figure}\\end{figure}')], 'p8img');
+  mk('p8caption', ['a caption typed as prose'], 'p8img');
+  mk('p8imgSize', ['Size'], 'p8img', { isPowerupProperty: async () => true }); // bookkeeping, never counted
+  const p8todo = mk('p8todo', ['finished todo'], 'p8', { isTodo: async () => true, getTodoStatus: async () => 'Finished' });
+  mk('p8todoStatus', ['Status'], 'p8todo', { isPowerupSlot: async () => true });
+  mk('p8lost', ['prose under the finished todo'], 'p8todo');
+  mk('p8todo2', ['finished todo with only todo children'], 'p8', { isTodo: async () => true, getTodoStatus: async () => 'Finished' });
+  mk('p8todo2a', ['nested todo'], 'p8todo2', { isTodo: async () => true, getTodoStatus: async () => 'Unfinished' });
+  mk('p8end', ['End'], 'p8');
+  mk('p8end1', [code('E')], 'p8end');
+  captured.latex = '';
+  captured.log = '';
+  const res8 = await runRem2TexConversion(plugin, { parentRem: p8, todoExportMode: 'unfinished' });
+  t.equal('image children and the skipped todo are absent from the paper', captured.latex, 'P\n\n\\begin{figure}\\end{figure}\n\nE');
+  t.check('exactly two warnings: image-rem child not exported, todo skipped with 1 lost descendant (Status/Size children ignored; todo-only subtree not warned)',
+    res8.status === 'success' && res8.warningCount === 2
+      && /Image rem .*1 child rem\(s\) that are not figure\/table blocks were not exported.*"a caption typed as prose"/.test(captured.log)
+      && /Todo "finished todo" was skipped by the todo mode together with 1 non-todo descendant rem\(s\).*"prose under the finished todo"/.test(captured.log),
+    JSON.stringify(res8) + '\n' + captured.log);
+
   return t.failures();
 }

@@ -1592,8 +1592,8 @@ async function emitTodoChildrenAsCommentTree(
         if (context.log) context.log.counts.todoComments += 1;
         emitIndentedCommentBlock(output, await todoComment(plugin, child, context), depth);
         await emitTodoChildrenAsCommentTree(plugin, child, output, context, depth + 1);
-      } else if (context.log) {
-        context.log.counts.todosSkipped += 1;
+      } else {
+        await noteSkippedTodo(plugin, child, context);
       }
     } else if (!childIsHeading && isCommentRem(child)) {
       if (context.log) context.log.counts.commentRems += 1;
@@ -1790,11 +1790,13 @@ async function getMediaCodeBlocksFromImmediateChildren(
   plugin: ReactRNPlugin,
   rem: Rem,
   hierarchyRemIds?: Set<string>
-): Promise<string[]> {
+): Promise<{ blocks: string[]; nonMediaChildren: Rem[] }> {
   const children = await rem.getChildrenRem();
   const blocks: string[] = [];
+  const nonMediaChildren: Rem[] = [];
 
   for (const child of children) {
+    if (await isBookkeepingRem(child)) continue;
     let found = false;
     const fromText = await richTextToString(plugin, child.text, { codeOnly: true });
     const sanitizedFromText = fromText ? stripTrailingCodeMetadataArtifacts(fromText) : '';
@@ -1815,11 +1817,48 @@ async function getMediaCodeBlocksFromImmediateChildren(
       const plain = await richTextToString(plugin, child.text, { hierarchyRemIds });
       if (plain && inferMediaTypeFromLatex(plain)) {
         blocks.push(plain);
+        found = true;
       }
     }
+    if (!found) nonMediaChildren.push(child);
   }
 
-  return blocks;
+  return { blocks, nonMediaChildren };
+}
+
+function quoteTitles(rems: Rem[], max = 5): string {
+  const titles = rems.slice(0, max).map((r) => `"${flattenRawTitleText(r.text).trim() || '(untitled)'}"`);
+  if (rems.length > max) titles.push(`… and ${rems.length - max} more`);
+  return titles.join(', ');
+}
+
+/** Count a todo skipped by the todo mode and warn when non-todo content vanishes with it. */
+async function noteSkippedTodo(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<void> {
+  const log = context.log;
+  if (!log) return;
+  log.counts.todosSkipped += 1;
+  const lost: Rem[] = [];
+  for (const descendant of await rem.getDescendants()) {
+    if (await descendant.isTodo()) continue;
+    if (await isBookkeepingRem(descendant)) continue;
+    if (!flattenRawTitleText(descendant.text).trim()) continue;
+    lost.push(descendant);
+  }
+  if (lost.length === 0) return;
+  const title = flattenRawTitleText(rem.text).trim() || '(untitled)';
+  let path: string | undefined;
+  try {
+    path = (await getRelativeSourceRemHierarchy(plugin, rem, context))?.join(' > ');
+  } catch {
+    path = undefined;
+  }
+  log.warn(
+    `Todo "${title}"${path && path !== title ? ` (${path})` : ''} was skipped by the todo mode together with ${lost.length} non-todo descendant rem(s), now missing from the paper: ${quoteTitles(lost)}`
+  );
 }
 
 function buildVisibleWarningBlock(message: string): string {
@@ -1883,19 +1922,31 @@ async function serializeNode(
       if (context.log) context.log.counts.todoComments += 1;
       output.push(await todoComment(plugin, rem, context));
       await emitTodoChildrenAsCommentTree(plugin, rem, output, context, 1);
-    } else if (context.log) {
-      context.log.counts.todosSkipped += 1;
+    } else {
+      await noteSkippedTodo(plugin, rem, context);
     }
     return;
   }
 
   const hasImageToken = hasImageTokenInRichText(rem.text) || hasImageTokenInRichText(rem.backText);
   if (hasImageToken) {
-    const mediaBlocks = await getMediaCodeBlocksFromImmediateChildren(
+    const { blocks: mediaBlocks, nonMediaChildren } = await getMediaCodeBlocksFromImmediateChildren(
       plugin,
       rem,
       context.hierarchyRemIds
     );
+    if (context.log && nonMediaChildren.length > 0) {
+      const imageTitle = flattenRawTitleText(rem.text).trim() || '(image rem)';
+      let path: string | undefined;
+      try {
+        path = (await getRelativeSourceRemHierarchy(plugin, rem, context))?.join(' > ');
+      } catch {
+        path = undefined;
+      }
+      context.log.warn(
+        `Image rem "${imageTitle}"${path && path !== imageTitle ? ` (${path})` : ''}: ${nonMediaChildren.length} child rem(s) that are not figure/table blocks were not exported (only figure/table code blocks under an image rem are): ${quoteTitles(nonMediaChildren)}`
+      );
+    }
     if (mediaBlocks.length === 0) {
       const remTitle = await getRemTitle(plugin, rem, context);
       const warningText = remTitle
@@ -2001,8 +2052,8 @@ async function serializeNode(
         if (context.log) context.log.counts.todoComments += 1;
         output.push(await todoComment(plugin, child, context));
         await emitTodoChildrenAsCommentTree(plugin, child, output, context, 1);
-      } else if (context.log) {
-        context.log.counts.todosSkipped += 1;
+      } else {
+        await noteSkippedTodo(plugin, child, context);
       }
     } else {
       nonTodoChildren.push(child);
