@@ -48,6 +48,7 @@ export function createFakeKb() {
         r.parent = typeof p === 'string' ? p : p._id;
       },
       getTagRems: async () => r.tags.map((t: string) => rems[t]),
+      taggedRem: async () => Object.values(rems).filter((x: FakeRem) => x.tags.includes(id)),
       addTag: async (t: any) => {
         r.tags.push(typeof t === 'string' ? t : t._id);
       },

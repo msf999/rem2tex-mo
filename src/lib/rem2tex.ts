@@ -17,6 +17,8 @@ export type Rem2TexConversionContext = {
   skipRemSubtreeIds?: Set<string>;
   /** Paper conversions record what happened here; the paragraph command has no log. */
   log?: Rem2TexLog;
+  /** Rems tagged `Rem2Tex-ignore` (see `loadIgnoredRemIds`); undefined = no tag rem exists. */
+  ignoredRemIds?: Set<string>;
 };
 
 /** Best-effort `\title`, `\author`, `\documentclass{…}` from raw preamble text (for the log). */
@@ -1439,33 +1441,42 @@ function leadingSpacesForTodoCommentDepth(depth: number): string {
   return ' '.repeat(Math.max(0, depth) * TODO_COMMENT_DEPTH_SPACES);
 }
 
-/** Tag (a rem with this exact title, matched case-insensitively) that hides a rem and its subtree. */
+/**
+ * The ignore tag: the **top-level** rem titled exactly `Rem2Tex-ignore` (the toggle command creates
+ * it there). Tagging a rem with it hides the rem and its subtree from every export.
+ */
 export const REM2TEX_IGNORE_TAG = 'Rem2Tex-ignore';
 
 function isIgnoreTagRem(rem: Rem): boolean {
   return flattenRawTitleText(rem.text).trim().toLowerCase() === REM2TEX_IGNORE_TAG.toLowerCase();
 }
 
-async function hasIgnoreTag(rem: Rem): Promise<boolean> {
+/**
+ * Ids of every rem tagged with the top-level `Rem2Tex-ignore` rem, fetched once per conversion via
+ * the tag's reverse lookup (`taggedRem`). `undefined` when no such tag rem exists — then no
+ * per-rem check happens at all, so authors who never use the tag pay nothing.
+ */
+async function loadIgnoredRemIds(plugin: ReactRNPlugin): Promise<Set<string> | undefined> {
   try {
-    const tags = await rem.getTagRems();
-    return tags.some((tag) => isIgnoreTagRem(tag));
+    const tagRem = await findIgnoreTagRem(plugin);
+    if (!tagRem) return undefined;
+    return new Set((await tagRem.taggedRem()).map((rem) => rem._id));
   } catch {
-    return false;
+    return undefined;
   }
 }
 
 /**
  * A rem tagged `Rem2Tex-ignore` is skipped together with its whole subtree, in every todo mode and
  * wherever it sits (body, todo/comment trees, Preamble/End descendants). Skips are listed in the
- * log.
+ * log. Membership comes from `context.ignoredRemIds` (see `loadIgnoredRemIds`) — no SDK call here.
  */
 async function isIgnoredRem(
   plugin: ReactRNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<boolean> {
-  if (!(await hasIgnoreTag(rem))) return false;
+  if (!context.ignoredRemIds?.has(rem._id)) return false;
   if (context.log) {
     const title = flattenRawTitleText(rem.text).trim() || (await getRemTitle(plugin, rem, context)).trim() || '(untitled)';
     let path: string | undefined;
@@ -2193,6 +2204,7 @@ export async function runRem2TexConversion(
     rootRemId: paperRem._id,
     todoExportMode,
     log,
+    ignoredRemIds: await loadIgnoredRemIds(plugin),
   };
 
   const paperTitle = (await getRemTitle(plugin, paperRem, context)).trim() || '(untitled)';
@@ -2295,6 +2307,7 @@ export async function runParagraphToTexConversion(
       rootRemId: paragraphRem._id,
       todoExportMode: 'all',
       skipRemSubtreeIds,
+      ignoredRemIds: await loadIgnoredRemIds(plugin),
     };
 
     const lines: string[] = [];

@@ -135,9 +135,11 @@ To match normal LaTeX, a rem whose text **starts with `%`** is a comment and is 
 
 ### Ignoring rems (`Rem2Tex-ignore`)
 
-Tag any rem with `Rem2Tex-ignore` and Rem2Tex leaves it **and its whole subtree** out of every export — a section, a paragraph, a todo (in every todo mode, including "copy all"), a `%` comment, or something under `Preamble` / `End`. The tag name is matched case-insensitively.
+Tag any rem with `Rem2Tex-ignore` and Rem2Tex leaves it **and its whole subtree** out of every export — a section, a paragraph, a todo (in every todo mode, including "copy all"), a `%` comment, or something under `Preamble` / `End`.
 
-You do not have to remember the name: run `Rem2Tex: Toggle Rem2Tex-ignore tag on this rem` (`/rem2tex-ignore`) on the focused rem. It adds the tag (creating the `Rem2Tex-ignore` tag rem in your knowledge base the first time) or removes it if it is already there, and says which in a toast. Skipped rems are listed in the export log.
+You do not have to remember the name: run `Rem2Tex: Toggle Rem2Tex-ignore tag on this rem` (`/rem2tex-ignore`) on the focused rem. It adds the tag (creating the `Rem2Tex-ignore` tag rem at the top level of your knowledge base the first time) or removes it if it is already there, and says which in a toast. Skipped rems are listed in the export log.
+
+The tag is the **top-level** rem named exactly `Rem2Tex-ignore`; a rem with that name nested somewhere else is not recognised. Rem2Tex reads the tag's list of tagged rems once per export, so the tag costs nothing when you don't use it.
 
 ## Preamble and End extraction
 
