@@ -5,3 +5,6 @@ dist-ssr
 *.local
 *.zip
 TODO.txt
+
+# Cross-machine dev log / working notes — kept local, not committed (mo, 2026-09-02).
+CLAUDE.md

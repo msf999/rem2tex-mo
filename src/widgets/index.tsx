@@ -1,134 +1,52 @@
-import {
-  declareIndexPlugin,
-  type ReactRNPlugin,
-  type Rem,
-  WidgetLocation,
-} from '@remnote/plugin-sdk';
+import { declareIndexPlugin, type ReactRNPlugin } from '@remnote/plugin-sdk';
 import '../style.css';
 import '../index.css'; // import <widget-name>.css
 import {
-  buildCompletedProgressLines,
-  buildProgressErrorState,
   getFocusedParentRem,
-  getRemTitle,
+  isRem2TexConversionError,
+  normalizeUnknownError,
+  REM2TEX_IGNORE_TAG,
   type Rem2TexTodoExportMode,
-  tryReadPreambleTitleAuthor,
-  type Rem2TexConversionContext,
-  type Rem2TexProgressUiState,
-  REM2TEX_PROGRESS_STORAGE_KEY,
-  REM2TEX_PROGRESS_TOTAL,
   runParagraphToTexConversion,
   runRem2TexConversion,
+  toggleIgnoreTag,
 } from '../lib/rem2tex';
 
-/**
- * Large fixed dimensions match Incremental Everything’s batch priority popup pattern
- * (hugomarins/incremental-everything `register/widgets.ts`: 1200×1150).
- */
-const REM2TEX_PROGRESS_POPUP_PX = { width: 1040, height: 760 } as const;
-
-/** Close any open plugin popup, then show the progress widget in the modal popup. */
-async function openOrReplaceRem2TexProgressPopup(plugin: ReactRNPlugin): Promise<void> {
-  try {
-    await plugin.widget.closePopup();
-  } catch {
-    /* no popup open */
+/** Toast text for anything thrown by a conversion (typed errors carry a human sentence). */
+function failureMessage(error: unknown): string {
+  if (isRem2TexConversionError(error)) {
+    const where = error.sourceRemTitle ? ` (at rem “${error.sourceRemTitle}”)` : '';
+    return `${error.headline}. ${error.whatHappened}${where}`;
   }
-  await plugin.widget.openPopup('rem2tex_progress');
+  return normalizeUnknownError(error);
 }
 
 async function onActivate(plugin: ReactRNPlugin) {
-  await plugin.app.registerWidget('rem2tex_progress', WidgetLocation.Popup, {
-    dimensions: {
-      width: REM2TEX_PROGRESS_POPUP_PX.width,
-      height: REM2TEX_PROGRESS_POPUP_PX.height,
-    },
-  });
-
-  const runExportWithTodoMode = async (
-    todoExportMode: Rem2TexTodoExportMode
+  /**
+   * Paper export: no popup. The export rem (`Rem2Tex/Rem2Tex <timestamp>`) holds a Paper code block
+   * and a Log code block; the toast only says whether to go and read the log.
+   */
+  const runPaperExport = async (
+    todoExportMode: Rem2TexTodoExportMode,
+    commandLabel: string
   ): Promise<void> => {
-      let parentRem: Rem;
-      let paperRemTitle: string | undefined;
-      try {
-        parentRem = await getFocusedParentRem(plugin);
-        const descendants = await parentRem.getDescendants();
-        const ctx: Rem2TexConversionContext = {
-          hierarchyRemIds: new Set([parentRem._id, ...descendants.map((r) => r._id)]),
-        };
-        paperRemTitle = (await getRemTitle(plugin, parentRem, ctx)) || undefined;
-      } catch (error) {
-        await plugin.storage.setSession(
-          REM2TEX_PROGRESS_STORAGE_KEY,
-          buildProgressErrorState(error)
+    try {
+      const result = await runRem2TexConversion(plugin, { todoExportMode, commandLabel });
+      if (result.status === 'success') {
+        await plugin.app.toast(
+          result.warningCount > 0
+            ? `Rem2Tex: exported “${result.outputTitle}” with ${result.warningCount} warning(s) — check its Log.`
+            : `Rem2Tex: exported “${result.outputTitle}”.`
         );
-        await openOrReplaceRem2TexProgressPopup(plugin);
-        return;
-      }
-
-      try {
-        const startedAtIso = new Date().toISOString();
-        const preambleMeta = await tryReadPreambleTitleAuthor(plugin, parentRem);
-        const preambleTitle = preambleMeta?.title ?? '';
-        const preambleAuthor = preambleMeta?.author ?? '';
-
-        await plugin.storage.setSession(REM2TEX_PROGRESS_STORAGE_KEY, {
-          phase: 'running',
-          step: 0,
-          total: REM2TEX_PROGRESS_TOTAL,
-          label: 'Starting…',
-          paperRemTitle,
-          startedAtIso,
-          preambleTitle,
-          preambleAuthor,
-          todoExportMode,
-          progressLog: [],
-        });
-        await openOrReplaceRem2TexProgressPopup(plugin);
-
-        const outputTitle = await runRem2TexConversion(plugin, {
-          parentRem,
-          todoExportMode,
-          onProgress: async (step, total, label) => {
-            await plugin.storage.setSession(REM2TEX_PROGRESS_STORAGE_KEY, {
-              phase: 'running',
-              step,
-              total,
-              label,
-              paperRemTitle,
-              startedAtIso,
-              preambleTitle,
-              preambleAuthor,
-              todoExportMode,
-              progressLog: buildCompletedProgressLines(step),
-            });
-          },
-        });
-
-        await plugin.storage.setSession(REM2TEX_PROGRESS_STORAGE_KEY, {
-          phase: 'success',
-          outputTitle,
-          paperRemTitle,
-          preambleTitle,
-          preambleAuthor,
-          todoExportMode,
-          progressLog: buildCompletedProgressLines(REM2TEX_PROGRESS_TOTAL + 1),
-        });
-      } catch (error) {
-        const prev = await plugin.storage.getSession<Rem2TexProgressUiState>(REM2TEX_PROGRESS_STORAGE_KEY);
-        const running = prev?.phase === 'running' ? prev : undefined;
-        await plugin.storage.setSession(
-          REM2TEX_PROGRESS_STORAGE_KEY,
-          buildProgressErrorState(error, {
-            paperRemTitle,
-            preambleTitle: running?.preambleTitle,
-            preambleAuthor: running?.preambleAuthor,
-            todoExportMode: running?.todoExportMode,
-            progressLog: running?.progressLog,
-            failedAtLabel: running?.label,
-          })
+      } else {
+        await plugin.app.toast(
+          `Rem2Tex failed: ${result.errorHeadline}. See the Log under “${result.outputTitle}”.`
         );
       }
+    } catch (error) {
+      // Nothing was written (no paper found, or the export rems could not be created).
+      await plugin.app.toast(`Rem2Tex: ${failureMessage(error)}`);
+    }
   };
 
   // Convert the focused Paper rem tree into LaTeX and copy all todos as comments.
@@ -138,7 +56,7 @@ async function onActivate(plugin: ReactRNPlugin) {
     description:
       'Convert a Paper rem tree into LaTeX using Preamble/End and heading-formatted sections; copy all todos as `% TODO ...` comments.',
     quickCode: 'rem2tex',
-    action: async () => runExportWithTodoMode('all'),
+    action: async () => runPaperExport('all', 'Convert Paper to TeX (Copy All Todos as Comments)'),
   });
 
   // Convert and copy only unfinished todos as comments.
@@ -148,7 +66,8 @@ async function onActivate(plugin: ReactRNPlugin) {
     description:
       'Convert a Paper rem tree into LaTeX and copy only unfinished todos as `% TODO ...` comments.',
     quickCode: 'rem2tex-unfinished',
-    action: async () => runExportWithTodoMode('unfinished'),
+    action: async () =>
+      runPaperExport('unfinished', 'Convert Paper to TeX (Copy Unfinished Todos as Comments)'),
   });
 
   // Convert and do not copy todos as comments.
@@ -157,7 +76,28 @@ async function onActivate(plugin: ReactRNPlugin) {
     name: 'Rem2Tex: Convert Paper to TeX (Do Not Copy Todos as Comments)',
     description: 'Convert a Paper rem tree into LaTeX and skip todo comment output.',
     quickCode: 'rem2tex-no-todos',
-    action: async () => runExportWithTodoMode('none'),
+    action: async () => runPaperExport('none', 'Convert Paper to TeX (Do Not Copy Todos as Comments)'),
+  });
+
+  // Tag / untag the focused rem so exports skip it (and its subtree) without remembering the tag name.
+  await plugin.app.registerCommand({
+    id: 'rem2tex-toggle-ignore',
+    name: `Rem2Tex: Toggle ${REM2TEX_IGNORE_TAG} tag on this rem`,
+    description: `Add or remove the ${REM2TEX_IGNORE_TAG} tag on the focused rem. Tagged rems and their subtrees are left out of every Rem2Tex export.`,
+    quickCode: 'rem2tex-ignore',
+    action: async () => {
+      try {
+        const rem = await getFocusedParentRem(plugin);
+        const outcome = await toggleIgnoreTag(plugin, rem);
+        await plugin.app.toast(
+          outcome === 'added'
+            ? `Rem2Tex: tagged ${REM2TEX_IGNORE_TAG} — this rem and its subtree will be skipped by exports.`
+            : `Rem2Tex: removed the ${REM2TEX_IGNORE_TAG} tag — this rem exports again.`
+        );
+      } catch (error) {
+        await plugin.app.toast(`Rem2Tex: ${failureMessage(error)}`);
+      }
+    },
   });
 
   await plugin.app.registerCommand({
@@ -171,13 +111,10 @@ async function onActivate(plugin: ReactRNPlugin) {
         const title = await runParagraphToTexConversion(plugin);
         await plugin.app.toast(`Rem2Tex: added “${title}” with LaTeX under this rem.`);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await plugin.app.toast(`Rem2Tex paragraph export failed: ${message}`);
+        await plugin.app.toast(`Rem2Tex paragraph export failed: ${failureMessage(error)}`);
       }
     },
   });
-
-  await plugin.app.toast('Rem2Tex loaded. Type /rem2tex on a parent Rem to export.');
 }
 
 async function onDeactivate(_: ReactRNPlugin) {}
