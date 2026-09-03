@@ -1,329 +1,202 @@
+<div align="center">
+
+<img src="public/logo.png" alt="Rem2Tex" width="120" height="120" />
+
 # Rem2Tex
 
-Rem2Tex is a RemNote plugin that converts a structured RemNote paper outline into a LaTeX document string and writes it back into RemNote under a dedicated `Rem2Tex` exports rem.
+**Write your paper as a Remnote outline — export it as a LaTeX document.**
 
-## What Rem2Tex does
+</div>
 
-When you run the command:
+Rem2Tex is a [Remnote](https://www.remnote.com) plugin for authors who draft papers in Remnote.
+Headings become `\section`s, prose is LaTeX-escaped, code blocks pass through untouched, pins to your
+Zotero library become `\cite{…}`, and todos become `% TODO` comments. One command turns the outline
+into a complete `.tex` document and writes it — together with a readable conversion log — right back
+into your knowledge base.
 
-- Rem2Tex reads the currently focused rem: your paper rem, or its `Preamble` rem (then the parent is the paper).
-- It looks among the paper's children for:
-  - a child titled `Preamble` (any position — children before it, e.g. a `Scratchpad`, are ignored)
-  - the first child titled `End` after it
-- It converts all children between `Preamble` and `End` into LaTeX body content.
-- It assembles output as:
-  - preamble block
-  - converted body
-  - end block
-- It creates (if missing) a `Rem2Tex` child under the paper rem.
-- It creates a new export rem under that node named `Rem2Tex HH:MM AM/PM DD-MM-YYYY`.
-- Under the export rem it writes a `Paper` rem holding a `latex` code block with the document and a `Log` rem holding a `text` code block with the conversion log.
-- It shows a one-line toast: exported, exported with warnings (check the log), or failed (see the log).
+> [!IMPORTANT]
+> **Rem2Tex only ever adds.** It never edits or deletes your rems. Each export creates a new
+> `Rem2Tex <timestamp>` rem under your paper (with the document and a log as code blocks); everything
+> else in your outline is read, not touched.
 
-## Command
+> [!WARNING]
+> **Vibe-coded — experimental.** Rem2Tex was built largely by prompting an AI assistant, with light
+> human review. Check the generated LaTeX and read the log; expect rough edges.
 
-The plugin registers:
+---
 
-- `Rem2Tex: Convert Paper to TeX (Copy All Todos as Comments)` (`/rem2tex`)
-- `Rem2Tex: Convert Paper to TeX (Copy Unfinished Todos as Comments)` (`/rem2tex-unfinished`)
-- `Rem2Tex: Convert Paper to TeX (Do Not Copy Todos as Comments)` (`/rem2tex-no-todos`)
-- `Rem2Tex: Paragraph to TeX` (`/rem2tex-paragraph`)
-- `Rem2Tex: Toggle Rem2Tex-ignore tag on this rem` (`/rem2tex-ignore`) — see **Ignoring rems**
+## What it does
 
-Run paper commands while focused on the **paper rem** you want to export, or on **any of its children** (`Preamble`, `Abstract`, …): Rem2Tex first checks whether the focused rem is a paper (it has `Preamble`, `End` after it, and rems between them), then whether its parent is. Anything else gets a toast explaining what is missing and nothing is written.
+### Paper export
+- **Your outline is the paper.** A paper is any rem whose children contain a **`Preamble`**, an
+  **`End`** after it, and the body rems between them. Rems before `Preamble` (a scratchpad, notes) and
+  after `End` (supplementary material, earlier exports) are ignored.
+- **Run it anywhere on the paper** — on the paper rem itself or on any of its children (`Preamble`,
+  `Abstract`, …). Rem2Tex first checks whether the focused rem is a paper, then whether its parent is.
+- **Output in place:** a `Rem2Tex` folder under the paper rem gets a new `Rem2Tex HH:MM AM/PM
+  DD-MM-YYYY` rem per run, holding a **`Paper`** rem (a `latex` code block with the whole document)
+  and a **`Log`** rem (a `text` code block with the conversion log).
+- **One-line toast:** exported; exported with *n* warnings — check the log; failed — see the log; or,
+  when nothing could be written (no focused rem, not a paper), the reason itself.
 
-### Paragraph to TeX (`/rem2tex-paragraph`)
+### Body conversion
+- **Headings → sections.** Rems with Remnote heading formatting become `\section`, `\subsection`,
+  `\subsubsection`, `\paragraph`, `\subparagraph` by outline depth (the H1/H2/H3 size is ignored).
+- **Prose → paragraphs**, LaTeX-escaped (`%`, `&`, `_`, `#`, `$`, `{`, `}`, `^`, `\`) while anything
+  you typed as LaTeX — `\ce{ZnSnN2}`, `\textbf{…}`, `$E_g$`, `\begin{equation}…\end{equation}` — passes
+  through untouched. Remnote's own bold/italic/underline formatting is *not* converted: type the LaTeX.
+- **Code blocks → verbatim.** A rem that is a code block is emitted as-is; put tables, figures and
+  anything fragile in code blocks.
+- **Math elements → `$…$` / `$$…$$`**, with the usual clean-ups inside `equation` / `align` /
+  `gather` / `multline` environments (no nested delimiters, no stray blank lines before `\label`).
+- **Images → figures.** A rem containing an image must carry the LaTeX for it as a child code block
+  (or plain text) with `\begin{figure}` or `\begin{table}`; those blocks are emitted, the image itself
+  and the caption text are not. A missing block yields a visible `REM2TEX WARNING` box.
 
-Use this on **any** focused rem (not only a paper root). Rem2Tex serializes **that rem and its descendants** with the **same rules as paper body conversion** (headings, images, paragraphs, `% TODO …` comment trees, etc.). **Finished and unfinished todos** are always included as comments (equivalent to “copy all todos”).
+### Citations from Zotero
+- A **pin or reference to a rem under `Zotero / Items`** (the tree the [Remzot](https://github.com/msf999/remzot)
+  plugin maintains — items you add there by hand count too) becomes `\cite{<citekey>}`, the item doc's
+  title being the key. A pin to a note nested inside an item cites the item.
+- **Typed commands are never doubled:** `\cite{` + pin + `}` → `\cite{key}`, `\citep[p. 3]{` + pin +
+  `}` → `\citep[p. 3]{key}`; adjacent citations merge into `\cite{a, b}`.
+- **Every other pin is yours.** Pins to todos, figures, sections or notes are dropped from prose, so
+  pin freely for navigation. Inline references to other rems keep their visible text.
 
-It creates a **direct child** of the source rem named `Rem2Tex paragraph HH:MM AM/PM DD-MM-YYYY`, with a **nested** LaTeX code block rem under it. Earlier paragraph exports under the same rem are **not** re-included when you run the command again. This command writes no log; success or failure is shown in a **toast**.
+### Todos, comments, ignoring
+- **Todos → `% TODO [ ] …` / `% TODO [X] …` comments**, with their subtree as indented `%` lines (one
+  space per level). Three commands choose the policy: all todos, unfinished only, none.
+- **A rem that starts with `%` is a LaTeX comment**, treated like a todo: emitted unescaped with its
+  subtree as comments, in every todo mode.
+- **`Rem2Tex-ignore`:** tag any rem and it — with its whole subtree — is left out of every export.
+  The `/rem2tex-ignore` command toggles the tag on the focused rem so you never type the name.
 
-### Output and the log
+### Paragraph export
+`Rem2Tex: Paragraph to TeX` converts just the focused rem and its descendants with the same body
+rules (all todos as comments) and adds a `Rem2Tex paragraph <timestamp>` child with the LaTeX. Handy
+for one section; it writes no log.
 
-A **paper** command writes, under the paper rem:
+---
 
-- `Rem2Tex`
-  - `Rem2Tex 03:23 PM 03-09-2026`
-    - `Paper` (missing when the conversion failed)
-      - a `latex` code block: the whole document
-    - `Log`
-      - a `text` code block: the conversion **log**
+## How your paper looks in Remnote
 
-There is no dialog. The toast says one of:
+```
+Paper (any name)
+├─ Scratchpad                    ← anything before Preamble is ignored
+├─ Preamble                      ← required; its code block holds \documentclass … \begin{document}
+│  └─ [latex code block]
+├─ Abstract                      ← heading → \section{Abstract}
+│  └─ We study …                    prose → escaped paragraph
+├─ Introduction                  ← heading
+│  ├─ Renewed interest \cite{ ⟨pin → Zotero/Items/keFirst2024⟩ } …
+│  ├─ % reviewer 2 asked for more context on this      ← % rem → comment line
+│  └─ ☐ add the ZnTiN2 numbers                          ← todo → % TODO [ ] add the …
+├─ Results and Discussion
+│  ├─ [image rem]
+│  │  └─ [latex code block: \begin{figure} … \label{fig:setup} … \end{figure}]
+│  └─ [latex code block: \begin{table} … \end{table}]
+├─ End                           ← required, the first End after Preamble; \end{document} etc.
+│  └─ [latex code block]
+├─ Supplementary Information     ← anything after End is ignored
+└─ Rem2Tex                       ← created by Rem2Tex, appended after End
+   └─ Rem2Tex 03:23 PM 03-09-2026
+      ├─ Paper
+      │  └─ [latex code block]     the whole document
+      └─ Log
+         └─ [text code block]      the conversion log
+```
 
-- `Rem2Tex: exported “Rem2Tex 03:23 PM 03-09-2026”.`
-- `Rem2Tex: exported “…” with 2 warning(s) — check its Log.`
-- `Rem2Tex failed: <what went wrong>. See the Log under “…”.`
-- `Rem2Tex: <what went wrong>` — when nothing could be written (no focused rem, or not a paper).
+> [!TIP]
+> Cite by pinning the paper's rem under `Zotero / Items` — inside a typed `\cite{…}` if you like — or
+> type the key. Type `\ref{fig:setup}` yourself for figures, tables and equations; a pin inside
+> `\ref{…}` is dropped like any other pin. Prose that must start with a literal percent sign begins
+> with `\%`.
 
-The log is plain text meant to be read top to bottom:
+---
+
+## Setup
+
+1. **Install.** Rem2Tex is unlisted. Either load it from the dev server (`npm run dev`, then in
+   Remnote **Settings → Plugins → Build → `http://localhost:8080`**) or build `PluginZip.zip`
+   (`npm run build`) and load that as a local plugin. There are no settings to fill in.
+2. **Structure your paper** as above: a paper rem with `Preamble` and `End` children (each with a
+   code block) and your sections between them.
+3. **Type `/` on the paper rem** (or any of its children) and run **Rem2Tex: Convert Paper to TeX**
+   (quick code `rem2tex`). Open the new `Rem2Tex <timestamp>` rem, copy the `Paper` code block into
+   your `.tex` project, and read the `Log` if the toast asked you to.
+
+## Commands
+
+| Command | Quick code | What it does |
+| --- | --- | --- |
+| **Rem2Tex: Convert Paper to TeX (Copy All Todos as Comments)** | `rem2tex` | Export the paper; every todo becomes a `% TODO` comment. |
+| **Rem2Tex: Convert Paper to TeX (Copy Unfinished Todos as Comments)** | `rem2tex-unfinished` | Export the paper; only unfinished todos are kept as comments (finished ones vanish with their subtrees). |
+| **Rem2Tex: Convert Paper to TeX (Do Not Copy Todos as Comments)** | `rem2tex-no-todos` | Export the paper without any todo comments (todos vanish with their subtrees). |
+| **Rem2Tex: Paragraph to TeX** | `rem2tex-paragraph` | Convert the focused rem and its descendants into a `Rem2Tex paragraph <timestamp>` child. |
+| **Rem2Tex: Toggle Rem2Tex-ignore tag on this rem** | `rem2tex-ignore` | Add or remove the `Rem2Tex-ignore` tag on the focused rem (creates the tag rem the first time). |
+
+## The log
+
+Every paper export writes a plain-text log next to the document, meant to be read top to bottom:
 
 - **Setup** — command, todo mode, the paper rem (and the child you started on, if any)
-- **Structure** — how many children the paper has, where `Preamble` and `End` sit, the body rems, and what was ignored before `Preamble` / after `End`
+- **Structure** — how many children the paper has, where `Preamble` and `End` sit, the body rems, what was ignored before `Preamble` / after `End`
 - **Conversion** — Preamble/End block sizes, `\documentclass`, `\title`, `\author`, body size
-- **Conversion summary** — headings, paragraphs, raw code blocks, figure/table blocks, citations (with their keys), pins dropped from prose, todo comments exported/skipped, `%` comment rems, rems skipped by the `Rem2Tex-ignore` tag
+- **Conversion summary** — headings, paragraphs, raw code blocks, figure/table blocks, citations (with their keys), pins dropped from prose, todo comments exported/skipped, `%` comment rems, rems skipped by `Rem2Tex-ignore`, earlier exports skipped
 - **Skipped by Rem2Tex-ignore** — each skipped rem with its path (only when there were any)
-- **Warnings** — e.g. an image rem without a figure/table block (a `REM2TEX WARNING` box was inserted), plain-text lines under `Preamble`/`End` that a code block took precedence over; each names the rem and its path
-- **Result** — `SUCCESS` (with the LaTeX line count) or `FAILED — CODE: headline`, what happened, the section/subsection, the rem being converted with its path, id and text preview, technical detail, and suggestions
+- **Warnings** — content that did not make it into the document, each naming the rem and its path (see *Errors and warnings*)
+- **Result** — `SUCCESS` with the LaTeX line count, or `FAILED — CODE: headline` with what happened, the section, the rem being converted (path, id, text preview), technical detail and suggestions
 
 Copy the log into a bug report when asking for help.
 
-## Required top-level paper structure
+---
 
-Expected paper tree:
+## Reference
 
-- `Paper` (or any parent rem name)
-  - optional rems before `Preamble`, e.g. `Scratchpad` (ignored by converter)
-  - `Preamble` (required, any position)
-  - body rems (sections/content)
-  - `End` (required, the first `End` after `Preamble`)
-  - optional extra rems after `End`, e.g. `Supplementary Information`, earlier exports (ignored by converter)
+### Preamble and End
+`Preamble` and `End` are read as **boundary blocks**: every descendant contributes its code block(s)
+(front or back text); if a boundary rem has no code at all, its descendants' plain text is used
+instead. When a boundary subtree mixes code blocks and plain-text rems the code wins and each
+plain-text line is appended as a `% REM2TEX: … not exported` comment (and listed as a warning) so
+nothing disappears silently. A `Preamble`/`End` rem with no children is empty unless the block sits on
+its back text — its own title is never exported. Remnote bookkeeping (`Size`, `Language`, trailing
+`true`/`false`/`latex` lines) is filtered out.
 
-Important behavior:
-
-- `Preamble` does not need to be the first child and `End` does not need to be the last.
-- Only what lies strictly between `Preamble` and `End` becomes the paper body; everything before or after is ignored, which allows keeping scratch notes and prior exports in place.
-- An `End` that appears before `Preamble` does not count.
-
-## How body conversion works
-
-### Headings vs paragraphs
-
-Rem2Tex uses RemNote heading formatting to decide heading nodes:
-
-- heading rems become:
-  - `\section`
-  - `\subsection`
-  - `\subsubsection`
-  - `\paragraph`
-  - `\subparagraph`
-- non-heading rems become paragraph/content text.
-
-### TODO rem handling
-
-TODO export is command-dependent:
-
-- **Copy all todos**: unfinished and finished todos are exported as comments
-  - unfinished -> `% TODO [ ] ...`
-  - finished -> `% TODO [X] ...`
-- **Copy unfinished todos only**: only unfinished todos are exported as comments
-- **Do not copy todos**: todo rems are skipped from comment output
-
-If a rem is both a **heading and a todo**, it is treated as a heading only (todo status is ignored for section output).
-
-**Indented TODO subtrees:** When a non-heading todo is exported as a comment, its **child rems** are also emitted as `%` comment lines below it. **Indentation** follows outline depth with **one leading space per level** before the `%` (the whole line shifts right, not only the text after `%`).
-
-- Non-todo children: one line each, indented `%  - ` plus a short title (from the rem’s title/text).
-- Nested todo children: the full `% TODO [ ] …` / `% TODO [X] …` line for that child is emitted at the deeper indent (then its own descendants continue underneath).
-- Nested `%` comment children (see **Comment rems**): emitted as their own `%` line(s) at the deeper indent, not as a `%  - ` label.
-
-A todo that is **not** exported (mode "do not copy", or a finished todo in "unfinished only") is skipped **together with all of its descendants** — prose or code nested under it never becomes body text.
-
-**Todo status artifact:** RemNote surfaces the checkbox state as a reference to a bookkeeping `Status` rem. Such references are dropped (and any leftover `\cite{Status}` is stripped) so the fragment never appears in the TeX.
-
-**Pins inside `% TODO …` lines:** a comment never reaches the compiled document, so pins are more useful than harmful there. A pin to a Zotero item still becomes `\cite{...}`; any other pin (a todo, a figure, a note) shows the pinned rem's **visible text** instead of being dropped as it is in body prose (see **Citation and rem-link behavior**).
+### Todo details
+- Unfinished → `% TODO [ ] …`, finished → `% TODO [X] …`; a rem that is both a heading and a todo is a heading.
+- Children of an exported todo become indented `%` lines: non-todo children as `%  - <title>`, nested todos as their own `% TODO …` line, nested `%` rems as their own comment line — the whole line shifts right one space per level.
+- A todo the mode skips takes **all** its descendants with it (prose or code under a finished todo is gone in "unfinished only" mode); the log warns when that loses non-todo content.
+- Pins inside `% TODO` and `%` comment lines show the pinned rem's text (a Zotero pin still becomes `\cite{…}`); the todo status marker Remnote stores as a `Status` reference is dropped.
+- Children of a prose rem are exported in outline order; comment lines sit tight under whatever precedes them, other children start a new paragraph.
 
 ### Comment rems (`%`)
-
-To match normal LaTeX, a rem whose text **starts with `%`** is a comment and is treated exactly like a todo comment:
-
-- its text is emitted **unescaped** (pins resolve as in `% TODO` lines); lines are trimmed, blank lines dropped, and each line of a multi-line text gets a `% ` prefix unless it already starts with `%`
-- prose that must **start with a literal percent sign** (e.g. "5% of samples") should start with `\%` — `%5 of samples` is a comment, exactly as in LaTeX
-- its **children** become the same indented `%` comment tree as under a todo
-- it is emitted in **every** todo mode (it is your own LaTeX comment, not a todo) and stays **in outline order** (it is not hoisted like todo children)
-- headings and todos take precedence (a heading starting with `%` is still a heading; a todo is still `% TODO …`), and a **code block** starting with `%` is still a code block
+A rem whose text starts with `%` is emitted unescaped (lines trimmed, blank lines dropped, `% ` prefixed to lines that lack it), with its children as the same comment tree as a todo, in every todo mode. Headings, todos and code blocks take precedence over the `%` rule. `%5 of samples` is a comment, exactly as in LaTeX — write `\%5 …` for prose.
 
 ### Ignoring rems (`Rem2Tex-ignore`)
+The tag is the **top-level** rem named exactly `Rem2Tex-ignore` (the toggle command creates it there); a same-named rem nested elsewhere is not recognised. Tagged rems and their subtrees are skipped everywhere — sections, prose, todos in every mode, `%` comments, even under `Preamble`/`End` — and listed in the log. Rem2Tex reads the tag's list of tagged rems once per export, so the tag costs nothing when unused.
 
-Tag any rem with `Rem2Tex-ignore` and Rem2Tex leaves it **and its whole subtree** out of every export — a section, a paragraph, a todo (in every todo mode, including "copy all"), a `%` comment, or something under `Preamble` / `End`.
+### Citation details
+- Key = the Zotero item doc's title with whitespace removed and characters outside `A-Z a-z 0-9 : _ -` stripped; a title that already is a `\cite{…}` is used verbatim; fallback `\cite{rem_<id>}`.
+- `\cite{one}\cite{two}` → `\cite{one, two}`; whitespace-separated citations merge too; duplicate keys are removed.
+- Typed `\cite`, `\citep`, `\citet`, `\parencite`, `\textcite`, `\autocite`, … (with `*` / `[options]`) around pins are unwrapped; `\cite{smith2020, ` + pin + `}` → `\cite{smith2020, key}`.
+- References to Remnote bookkeeping rems (powerup properties/slots) and rems whose text starts with `query:` export as nothing. Rem2Tex's own earlier export rems inside the body are skipped.
 
-You do not have to remember the name: run `Rem2Tex: Toggle Rem2Tex-ignore tag on this rem` (`/rem2tex-ignore`) on the focused rem. It adds the tag (creating the `Rem2Tex-ignore` tag rem at the top level of your knowledge base the first time) or removes it if it is already there, and says which in a toast. Skipped rems are listed in the export log.
+### Escaping and math
+Protected as-is: LaTeX commands with their `[…]`/`{…}` arguments, `$…$`, `$$…$$`, `\(…\)`, `\[…\]`, and `\begin{…}…\end{…}` environments (nested same-name environments included). Everything else has `{ } $ & # % _ ^ \` escaped. Remnote math elements become `$…$`, or `$$…$$` when marked as block; inside `equation`/`align`/`gather`/`multline` (and starred variants) per-line `$…$` wrappers are removed and blank lines before `\label` collapsed. Body rems use their main text only; `Preamble`/`End` and figure children may also use back text.
 
-The tag is the **top-level** rem named exactly `Rem2Tex-ignore`; a rem with that name nested somewhere else is not recognised. Rem2Tex reads the tag's list of tagged rems once per export, so the tag costs nothing when you don't use it.
+### Errors and warnings
+Toast only, nothing written: no focused rem (`NO_FOCUSED_REM`, `INACCESSIBLE_REM`); the focused rem is not a paper and neither is its parent (`NOT_A_PAPER` — the toast says what is missing on each: no `Preamble`, no `End` after it, or nothing between them).
 
-## Preamble and End extraction
+Written into the log (an export rem with only the `Log` rem; the toast says to read it): an empty `Preamble`/`End` block (`EMPTY_BOUNDARY_BLOCK`); an unexpected failure while converting a body rem (`REM_CONVERSION_FAILED` — the log names the rem, its section and path).
 
-`Preamble` and `End` are treated as boundary blocks:
+Warnings (conversion continues; counted in the toast, listed in the log): an image rem without a figure/table block (a `REM2TEX WARNING` box is inserted); an image rem's children that are not figure/table blocks (not exported); plain-text lines under `Preamble`/`End` that lost to a code block; a todo skipped by the mode together with non-todo descendants.
 
-- converter prefers code-formatted content from descendants
-- if no code is found, it falls back to plain text
-- a `Preamble` / `End` rem with no children is empty (`EMPTY_BOUNDARY_BLOCK`) unless the block sits on its back text; its own title is never exported
-- if a boundary subtree mixes code blocks and plain-text rems, the code wins and each plain-text line is appended as a `% REM2TEX: … not exported` comment so nothing disappears silently
-- code-block metadata artifacts and RemNote bookkeeping rems (e.g. a heading's `Size` child) are filtered out
-
-Filtered artifacts include labels such as:
-
-- `Size`
-- `H1` to `H6`
-- `BoundHeight`
-- `Language`
-- trailing `true` / `false` / `latex`
-
-## Tables and figures (current media model)
-
-Rem2Tex uses a codeblock-first media strategy.
-
-### Image rems
-
-If a rem contains an image token:
-
-- it must have at least one immediate child code block containing media LaTeX (a child whose plain text is a `\begin{figure}` / `\begin{table}` environment is accepted too, and emitted unescaped)
-- valid media block is inferred from LaTeX content:
-  - `\begin{figure}`
-  - `\begin{table}`
-- all valid child media code blocks are emitted in child order
-- the parent rem image/title prose is ignored for output
-
-If an image rem has no valid child media code block:
-
-- conversion continues
-- a highly visible boxed `REM2TEX WARNING` block is inserted into the output
-- warning text is escaped to prevent LaTeX compile errors
-
-### Standalone media code blocks
-
-Standalone media blocks (e.g. table/figure LaTeX in a non-image rem) are supported through normal code-aware conversion paths and are emitted as raw LaTeX when the rem is truly code-formatted.
-
-**Body rems vs boundary blocks:** For ordinary body rems, code detection uses the rem’s **main text** (`rem.text`) only. `Preamble` / `End` extraction (and some media paths) can also read **back text** (`backText`); if you rely on code in `backText` for a normal paragraph rem, move it into the main text or a child code block.
-
-## Math and LaTeX escaping behavior
-
-Rem2Tex applies context-aware escaping to protect normal prose while preserving LaTeX syntax.
-
-**RemNote text formatting is not converted.** Bold, italic, underline, sub/superscript, inline code, strikethrough, highlight and colour applied in RemNote are dropped and the text comes out plain. Type the LaTeX yourself (`\textbf{...}`, `\textit{...}`, `\textsuperscript{...}`, …); commands pass through untouched.
-
-### Preserved/protected patterns
-
-- LaTeX commands and arguments:
-  - `\ce{...}`, `\cite{...}`, `\textbf{...}`, etc.
-- inline and display delimiters:
-  - `$...$`, `$$...$$`, `\(...\)`, `\[...\]`
-- full LaTeX environments:
-  - `\begin{...} ... \end{...}` (with nested same-environment support)
-
-### RemNote rich-text math tokens
-
-RemNote LaTeX rich-text elements are converted to delimited math:
-
-- inline math defaults to `$...$`
-- block math uses `$$...$$` when marked as block by rich text metadata
-
-Inside math environments (`equation`, `align`, `gather`, `multline`, and starred variants), Rem2Tex normalizes wrappers to avoid nested delimiter issues.
-
-### Additional normalization
-
-- removes spurious blank lines before `\label{...}` in math environments
-- prevents runaway blank spacing inside math blocks
-
-## Citation and rem-link behavior
-
-Pins are the author's tool, not the exporter's. Only one kind of reference means anything to Rem2Tex:
-
-- a **pin or inline reference to a rem under `Zotero/Items`** (the tree the Remzot plugin maintains;
-  items you added there by hand before a sync count too) becomes `\cite{<item doc title>}` — Remzot
-  names item docs with the citekey. A pin to a note nested *inside* an item cites the item.
-- any other **pin** (to a todo, a figure, a section, a note anywhere else) is **dropped from body
-  prose** — pin freely for your own navigation and reminders; nothing leaks into the LaTeX. Inside
-  `% TODO …` comment lines such pins show the pinned rem's text instead.
-- an **inline reference** (a rem reference that is not a pin, i.e. renders the rem's name as words in
-  your sentence) to a non-Zotero rem keeps its visible text.
-- references to RemNote bookkeeping rems (powerup properties/slots such as a todo's `Status`) are
-  always dropped.
-- a rem whose text starts with `query:` (a RemNote search-portal payload) exports as nothing.
-
-Rem2Tex no longer turns pins to local figures/tables/code into `\ref{...}`: type the label yourself
-(`\ref{fig:setup}`). A pin placed inside a typed `\ref{...}` is dropped like any other pin.
-
-Adjacent citation normalization:
-
-- adjacent citations are merged: `\cite{one}\cite{two}` -> `\cite{one, two}`
-- whitespace-separated adjacent citations are merged similarly
-- duplicate adjacent keys are deduplicated:
-  - `\cite{one}\cite{one}\cite{two}` -> `\cite{one, two}`
-
-Typed citation/reference commands around a pin are not doubled:
-
-- if you type `\cite{`, then pin the paper's rem, then `}`, the pin's own `\cite{key}` is unwrapped
-  into your command: `\cite{` + pin + `}` -> `\cite{key}` (not `\cite{\cite{key}}`)
-- works for `\citep`, `\citet`, `\parencite`, `\textcite`, `\autocite`, etc. (with `*` / `[options]`)
-- mixed and multiple keys are kept and deduplicated: `\cite{smith2020, ` + pin + `}` ->
-  `\cite{smith2020, key}`
-
-Citation key details:
-
-- key = the Zotero item doc's title with whitespace removed and characters outside `A-Z a-z 0-9 : _ -`
-  stripped; a title that is already a `\cite{...}` is used verbatim
-- fallback: `\cite{rem_<id>}` if the item doc has no usable title
-
-For code-only extraction:
-
-- rem reference tokens are ignored to avoid importing UI metadata into code output
-
-## Error and warning behavior
-
-Errors that stop before anything is written (toast only):
-
-- no focused/selected rem (`NO_FOCUSED_REM`, `INACCESSIBLE_REM`)
-- the focused rem is not a paper and neither is its parent (`NOT_A_PAPER`) — the toast says what is
-  missing on each: no `Preamble`, no `End` after it, or nothing between them
-
-Errors during the conversion (an export rem with only the log is written; the toast says to read it):
-
-- empty `Preamble` / `End` block (`EMPTY_BOUNDARY_BLOCK`)
-- an unexpected failure while converting a body rem (`REM_CONVERSION_FAILED`) — the log names the
-  rem, its section and its path so you can find it
-
-Warnings (conversion continues; counted in the toast and listed in the log):
-
-- image rem without a valid child figure/table code block (a `REM2TEX WARNING` box is inserted)
-- plain-text lines under `Preamble` / `End` that lost to a code block (kept as `% REM2TEX:` comments)
-
-## Authoring recommendations
-
-To get stable output:
-
-- keep full document preamble only under `Preamble`
-- keep full document tail under `End`
-- use heading formatting for section hierarchy
-- put complex LaTeX (tables/figures/equations) in code blocks when possible
-- for figure/image rems, always include child figure/table code block(s)
-- cite by pinning the paper's rem under `Zotero/Items` (optionally inside a typed `\cite{…}`), or type
-  the key; type `\ref{label}` yourself for figures/tables/equations
-- pin todos, figures and notes into your prose as much as you like — those pins never export
-
-## Example high-level tree
-
-- `Paper`
-  - `Preamble`
-    - code block with preamble
-  - `Abstract` (heading)
-  - `Introduction` (heading)
-  - `Results and Discussion` (heading)
-    - prose rems
-    - table code block rem
-    - image rem
-      - figure code block child
-  - `Conclusion` (heading)
-  - `End`
-    - code block with `\begin{document}` closure/end material
-  - `Rem2Tex`
-    - `Rem2Tex 09:42 AM 18-04-2026` (auto-generated export)
-      - `Paper`
-        - `latex` code block
-      - `Log`
-        - `text` code block
-    - `Rem2Tex 11:05 AM 19-04-2026` (auto-generated export)
-      - `Paper`
-        - `latex` code block
-      - `Log`
-        - `text` code block
+---
 
 ## Development
 
-- The npm package name is `rem2tex-mo` (see `package.json`).
-- Build for RemNote: `npm install` then `npm run build` — produces `PluginZip.zip` in the project root for sideloading.
-
-## Notes
-
-- This plugin is optimized for author-driven LaTeX workflows where RemNote stores structure and draft text, and code blocks store exact LaTeX for complex constructs.
-- Existing exports can stay in the tree; they are safely ignored if placed after `End`.
+- `npm ci` on **Node 16.15.1** (`.nvmrc`), then `npm run dev` for the dev server on port 8080.
+- `npx tsc --noEmit` type-checks `src/` and `tests/`; `npm test` runs the exporter against a fake
+  knowledge base (no framework).
+- `npm run build` validates the manifest and writes `PluginZip.zip` (removing the old one first).
+- The plugin registers no settings, no widgets and no powerups; its only scope is
+  `All = ReadCreateModify` (it never deletes).
