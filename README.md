@@ -145,6 +145,7 @@ You do not have to remember the name: run `Rem2Tex: Toggle Rem2Tex-ignore tag on
 
 - converter prefers code-formatted content from descendants
 - if no code is found, it falls back to plain text
+- a `Preamble` / `End` rem with no children is empty (`EMPTY_BOUNDARY_BLOCK`) unless the block sits on its back text; its own title is never exported
 - if a boundary subtree mixes code blocks and plain-text rems, the code wins and each plain-text line is appended as a `% REM2TEX: … not exported` comment so nothing disappears silently
 - code-block metadata artifacts and RemNote bookkeeping rems (e.g. a heading's `Size` child) are filtered out
 

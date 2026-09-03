@@ -154,5 +154,19 @@ export async function run(): Promise<number> {
       && /Todo "finished todo" was skipped by the todo mode together with 1 non-todo descendant rem\(s\).*"prose under the finished todo"/.test(captured.log),
     JSON.stringify(res8) + '\n' + captured.log);
 
+  // 9. a childless boundary rem is empty (item 6) — its title is not the block; back text still counts
+  const p9 = mk('p9', ['Paper 9'], null);
+  mk('p9pre', ['Preamble'], 'p9');
+  mk('p9body', ['body'], 'p9');
+  mk('p9end', ['End'], 'p9');
+  mk('p9end1', [code('E')], 'p9end');
+  captured.latex = 'UNCHANGED';
+  const res9 = await runRem2TexConversion(plugin, { parentRem: p9 });
+  t.check('childless Preamble → EMPTY_BOUNDARY_BLOCK (no Paper rem)', res9.status === 'failed' && res9.errorCode === 'EMPTY_BOUNDARY_BLOCK' && captured.latex === 'UNCHANGED', JSON.stringify(res9));
+  rems['p9pre'].backText = [code('\\documentclass{article}')];
+  captured.latex = '';
+  const res9b = await runRem2TexConversion(plugin, { parentRem: p9 });
+  t.check('childless Preamble with a code block on its back text works', res9b.status === 'success' && captured.latex === '\\documentclass{article}\n\nbody\n\nE', JSON.stringify(res9b) + '\n' + captured.latex);
+
   return t.failures();
 }

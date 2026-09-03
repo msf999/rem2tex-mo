@@ -1181,20 +1181,16 @@ async function getBoundaryBlock(
       await collectDescendantText(child);
     }
   } else {
-    const directCodeText = await richTextToString(plugin, boundaryRem.backText ?? boundaryRem.text, {
-      codeOnly: true,
-    });
-    const directText =
-      directCodeText ||
-      (await richTextToString(plugin, boundaryRem.backText ?? boundaryRem.text, {
+    // A boundary rem without children: only its back text can hold the block — the front text is
+    // the "Preamble" / "End" title itself, never LaTeX (until 2026-09-03 the title was exported).
+    const backCode = await richTextToString(plugin, boundaryRem.backText, { codeOnly: true });
+    if (backCode) {
+      codeLines.push(backCode);
+    } else {
+      const backPlain = await richTextToString(plugin, boundaryRem.backText, {
         hierarchyRemIds: context.hierarchyRemIds,
-      }));
-    if (directText) {
-      if (directCodeText) {
-        codeLines.push(directText);
-      } else {
-        plainLines.push(directText);
-      }
+      });
+      if (backPlain) plainLines.push(backPlain);
     }
   }
 
