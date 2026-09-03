@@ -111,5 +111,23 @@ export async function run(): Promise<number> {
   await runRem2TexConversion(plugin, { parentRem: p4 });
   t.equal('an End before Preamble is ignored; the first End after it closes the body', captured.latex, 'P\n\nbody\n\nE');
 
+  // 7. Rem2Tex's own output inside the body is never re-exported (item 4 of the 2026-09-03 batch)
+  const p7 = mk('p7', ['Paper 7'], null);
+  mk('p7pre', ['Preamble'], 'p7');
+  mk('p7pre1', [code('P')], 'p7pre');
+  mk('p7sec', ['Section'], 'p7', heading);
+  mk('p7prose', ['real prose'], 'p7sec');
+  mk('p7old', ['Rem2Tex paragraph 01:00 PM 01-01-2026'], 'p7sec');
+  mk('p7oldcode', [code('OLD EXPORT')], 'p7old');
+  mk('p7folder', ['Rem2Tex'], 'p7'); // an exports folder that ended up before End
+  mk('p7folder1', ['Rem2Tex 02:00 PM 02-02-2026'], 'p7folder');
+  mk('p7end', ['End'], 'p7');
+  mk('p7end1', [code('E')], 'p7end');
+  captured.latex = '';
+  captured.log = '';
+  const res7 = await runRem2TexConversion(plugin, { parentRem: p7 });
+  t.equal('old paragraph export and a misplaced Rem2Tex folder are skipped', captured.latex, 'P\n\n\\section{Section}\n\nreal prose\n\nE');
+  t.check('log counts the skipped output rems', res7.status === 'success' && /Earlier Rem2Tex export rems found inside the body and skipped: 2/.test(captured.log), captured.log);
+
   return t.failures();
 }

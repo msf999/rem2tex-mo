@@ -121,6 +121,8 @@ export class Rem2TexLog {
     commentRems: 0,
     citations: 0,
     pinsDropped: 0,
+    /** Rem2Tex's own export rems / folder found inside the body and skipped. */
+    outputRemsSkipped: 0,
   };
   readonly citationKeys = new Set<string>();
   /** Rems (title + path) skipped because they carry the `Rem2Tex-ignore` tag. */
@@ -173,6 +175,9 @@ export class Rem2TexLog {
     out.push(`- Todo comments: ${c.todoComments} exported, ${c.todosSkipped} skipped by the todo mode`);
     out.push(`- % comment rems: ${c.commentRems}`);
     out.push(`- Rems skipped by the ${REM2TEX_IGNORE_TAG} tag (with their subtrees): ${this.ignoredRems.length}`);
+    if (c.outputRemsSkipped > 0) {
+      out.push(`- Earlier Rem2Tex export rems found inside the body and skipped: ${c.outputRemsSkipped}`);
+    }
     if (this.ignoredRems.length > 0) {
       const ignoredTitle = `Skipped by ${REM2TEX_IGNORE_TAG} (${this.ignoredRems.length})`;
       out.push('', ignoredTitle, '-'.repeat(ignoredTitle.length));
@@ -330,6 +335,17 @@ function toOutputTimestamp(now: Date = new Date()): string {
 function isParagraphExportRootRem(rem: Rem): boolean {
   const t = flattenRawTitleText(rem.text).trim();
   return /^Rem2Tex paragraph\b/i.test(t);
+}
+
+/**
+ * Rem2Tex's own output — the `Rem2Tex` folder and any `Rem2Tex <timestamp>` /
+ * `Rem2Tex paragraph <timestamp>` export rem — is never input: such rems are skipped with their
+ * subtrees wherever an export finds them (an old paragraph export left under a section, the folder
+ * itself when a paragraph export is run on a paper rem).
+ */
+function isRem2TexOutputRem(rem: Rem): boolean {
+  const t = flattenRawTitleText(rem.text).trim();
+  return t === 'Rem2Tex' || /^Rem2Tex( paragraph)? \d\d:\d\d [AP]M \d\d-\d\d-\d{4}$/.test(t);
 }
 
 async function collectParagraphExportSkipRemIds(paragraphRem: Rem): Promise<Set<string>> {
@@ -1848,6 +1864,10 @@ async function serializeNode(
   currentSubsectionTitle?: string
 ): Promise<void> {
   if (context.skipRemSubtreeIds?.has(rem._id)) {
+    return;
+  }
+  if (isRem2TexOutputRem(rem)) {
+    if (context.log) context.log.counts.outputRemsSkipped += 1;
     return;
   }
   if (await isIgnoredRem(plugin, rem, context)) {
