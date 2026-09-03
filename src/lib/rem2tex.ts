@@ -2049,8 +2049,11 @@ async function serializeNode(
     output.push(fromCodeBlock ? title : escapeLatex(title));
   }
 
+  // Children in outline order (since 2026-09-03; todo children used to be hoisted above their
+  // prose siblings). Todo and `%` comment lines sit tight under whatever precedes them; any other
+  // child starts a new paragraph, i.e. gets a blank line before it.
   const children = await rem.getChildrenRem();
-  const nonTodoChildren: Rem[] = [];
+  let emittedAny = Boolean(title);
   for (const child of children) {
     if (await isIgnoredRem(plugin, child, context)) continue;
     const childIsHeading = (await child.getFontSize()) !== undefined;
@@ -2059,19 +2062,16 @@ async function serializeNode(
         if (context.log) context.log.counts.todoComments += 1;
         output.push(await todoComment(plugin, child, context));
         await emitTodoChildrenAsCommentTree(plugin, child, output, context, 1);
+        emittedAny = true;
       } else {
         await noteSkippedTodo(plugin, child, context);
       }
-    } else {
-      nonTodoChildren.push(child);
+      continue;
     }
-  }
-
-  if (title || children.length > 0) {
-    output.push('');
-  }
-
-  for (const child of nonTodoChildren) {
+    const childIsComment = !childIsHeading && isCommentRem(child);
+    if (!childIsComment && output.length > 0 && output[output.length - 1] !== '') {
+      output.push('');
+    }
     try {
       await serializeNode(
         plugin,
@@ -2085,6 +2085,12 @@ async function serializeNode(
     } catch (error) {
       throw await enrichConversionErrorWithSourceRem(plugin, error, child, context, outlineLocation);
     }
+    emittedAny = true;
+  }
+
+  // Close the paragraph so the next sibling starts on its own.
+  if (emittedAny && output.length > 0 && output[output.length - 1] !== '') {
+    output.push('');
   }
 }
 

@@ -37,13 +37,12 @@ export async function run(): Promise<number> {
   mk('c3', ['% multi-line first\nsecond line'], 'root');
   mk('p2', ['closing prose'], 'root');
 
-  // Today todo children of a prose rem are hoisted above their prose siblings (item 8 of the
-  // 2026-09-03 batch changes this to outline order); depth-1 tree lines get one leading space; a %
-  // rem inside a todo tree is its own comment line.
+  // Children of a prose rem keep outline order (todos are not hoisted since item 8 of the
+  // 2026-09-03 batch); comment lines sit tight under their neighbours while any other child starts a
+  // new paragraph; depth-1 tree lines get one leading space; a % rem inside a todo tree is its own
+  // comment line.
   const expected = [
     'Root',
-    '% TODO [ ] todo with a % child',
-    ' % nested comment',
     '',
     'Intro prose with 5\\% \\& more',
     '',
@@ -51,6 +50,9 @@ export async function run(): Promise<number> {
     ' %  - sub-note child',
     ' % TODO [ ] fix wording',
     '% see \\cite{smith2020} for context',
+    '% TODO [ ] todo with a % child',
+    ' % nested comment',
+    '',
     '% not a comment, a code block',
     '\\begin{table}\\end{table}',
     '',
@@ -58,6 +60,7 @@ export async function run(): Promise<number> {
     '',
     '% multi-line first',
     '% second line',
+    '',
     'closing prose',
   ].join('\n');
 
