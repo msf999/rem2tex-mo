@@ -5,6 +5,7 @@
   "license": "MIT",
   "scripts": {
     "check-types": "tsc",
+    "test": "ts-node -T tests/run.ts",
     "dev": "cross-env NODE_ENV=development webpack-dev-server --color --progress --no-open",
     "build": "npx remnote-plugin validate && shx rm -rf dist PluginZip.zip && cross-env NODE_ENV=production webpack --color --progress && cd dist && bestzip ../PluginZip.zip ./*"
   },
