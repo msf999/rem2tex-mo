@@ -2323,16 +2323,29 @@ export async function runRem2TexConversion(
   log.info(
     `Children of the paper rem: ${childCount}; "${REQUIRED_PREAMBLE_NAME}" is child ${layout.ignoredBefore.length + 1}, "${REQUIRED_END_NAME}" is child ${layout.ignoredBefore.length + layout.bodyRems.length + 2}`
   );
-  // Rem2Tex's own exports sit between Preamble and End when the folder was created before End, but
-  // they are skipped (§4.1) — list them apart so the Structure section matches what is converted.
-  const convertedBodyRems = layout.bodyRems.filter((rem) => !isRem2TexOutputRem(rem));
+  // Two kinds of body rem are never converted: Rem2Tex's own earlier exports (§4.1, they sit between
+  // Preamble and End whenever the folder was created before End) and anything tagged
+  // `Rem2Tex-ignore`. Both are listed apart, so "Body rems" says exactly what was converted.
+  // Membership is read straight off the set — `isIgnoredRem` would record a skip as a side effect.
+  const isTaggedIgnored = (rem: Rem): boolean => context.ignoredRemIds?.has(rem._id) === true;
   const skippedBodyExports = layout.bodyRems.filter((rem) => isRem2TexOutputRem(rem));
+  const skippedBodyTagged = layout.bodyRems.filter(
+    (rem) => !isRem2TexOutputRem(rem) && isTaggedIgnored(rem)
+  );
+  const convertedBodyRems = layout.bodyRems.filter(
+    (rem) => !isRem2TexOutputRem(rem) && !isTaggedIgnored(rem)
+  );
   log.info(
     `Body rems (${convertedBodyRems.length}): ${await titlesForLog(plugin, convertedBodyRems, context)}`
   );
   if (skippedBodyExports.length > 0) {
     log.info(
       `Ignored inside the body — earlier Rem2Tex exports (${skippedBodyExports.length}): ${await titlesForLog(plugin, skippedBodyExports, context)}`
+    );
+  }
+  if (skippedBodyTagged.length > 0) {
+    log.info(
+      `Ignored inside the body — tagged ${REM2TEX_IGNORE_TAG} (${skippedBodyTagged.length}): ${await titlesForLog(plugin, skippedBodyTagged, context)}`
     );
   }
   if (layout.ignoredBefore.length > 0) {
@@ -2371,7 +2384,9 @@ export async function runRem2TexConversion(
       }
     }
     const body = bodyLines.join('\n').trim();
-    log.info(`Body: ${body.split('\n').length} line(s) of LaTeX from ${layout.bodyRems.length} top-level rem(s)`);
+    log.info(
+      `Body: ${body.split('\n').length} line(s) of LaTeX from ${convertedBodyRems.length} top-level rem(s)`
+    );
 
     const outputLines = [preamble.trim(), '', body, '', endBlock.trim()].filter(
       (_line, index, lines) => !(index > 0 && lines[index - 1] === '' && lines[index] === '')

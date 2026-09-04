@@ -8,3 +8,7 @@ TODO.txt
 
 # Cross-machine dev log / working notes — kept local, not committed (mo, 2026-09-02).
 CLAUDE.md
+
+# Live-test rig: drives the real plugin in the real app through Chrome DevTools. Local only,
+# like CLAUDE.md — it carries a source patch (live-test/hook.js) that must never ship.
+live-test/

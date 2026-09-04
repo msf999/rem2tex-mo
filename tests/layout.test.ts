@@ -1,4 +1,4 @@
-import { runRem2TexConversion, runParagraphToTexConversion, isRem2TexConversionError } from '../src/lib/rem2tex';
+import { runRem2TexConversion, runParagraphToTexConversion, isRem2TexConversionError, REM2TEX_IGNORE_TAG } from '../src/lib/rem2tex';
 import { createFakeKb, code, heading, suite } from './fake-kb';
 
 /** Paper layout (Preamble/End anchors, any child as starting point), the Paper/Log output shape, the Log text. */
@@ -126,6 +126,10 @@ export async function run(): Promise<number> {
   mk('p7oldcode', [code('OLD EXPORT')], 'p7old');
   mk('p7folder', ['Rem2Tex'], 'p7'); // an exports folder that ended up before End
   mk('p7folder1', ['Rem2Tex 02:00 PM 02-02-2026'], 'p7folder');
+  mk('p7tag', [REM2TEX_IGNORE_TAG], null);
+  const p7draft: any = mk('p7draft', ['Draft section'], 'p7', heading);
+  mk('p7drafted', ['hidden prose'], 'p7draft');
+  p7draft.tags.push('p7tag');
   mk('p7end', ['End'], 'p7');
   mk('p7end1', [code('E')], 'p7end');
   captured.latex = '';
@@ -136,6 +140,12 @@ export async function run(): Promise<number> {
   // The Structure section must not count a skipped export among the body rems (2026-09-04).
   t.check('Structure lists only converted body rems and names the skipped exports separately',
     /Body rems \(1\): "Section"/.test(captured.log) && /Ignored inside the body — earlier Rem2Tex exports \(1\): "Rem2Tex"/.test(captured.log),
+    captured.log);
+  t.check('Structure names an ignore-tagged body rem separately too, and the body count matches',
+    /Ignored inside the body — tagged Rem2Tex-ignore \(1\): "Draft section"/.test(captured.log) &&
+      !/Body rems[^\n]*Draft section/.test(captured.log) &&
+      /from 1 top-level rem\(s\)/.test(captured.log) &&
+      !captured.latex.includes('hidden prose'),
     captured.log);
 
   // 8. silently lost content is warned about (item 5): image-rem children, todo skipped by the mode
