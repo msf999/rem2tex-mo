@@ -98,6 +98,11 @@ export async function run(): Promise<number> {
   captured.log = '';
   const res6 = await runRem2TexConversion(plugin, { parentRem: p6 });
   t.check('image rem without media → success with 1 warning listed in the Log', res6.status === 'success' && res6.warningCount === 1 && /Warnings \(1\)/.test(captured.log) && /REM2TEX WARNING box was inserted/.test(captured.log), JSON.stringify(res6) + '\n' + captured.log);
+  // The box's own message must be escaped in ONE pass: chaining replaces used to mangle the
+  // `\textbackslash{}` it inserted into `\textbackslash\{\}` (found in live testing, 2026-09-04).
+  t.check('the REM2TEX WARNING box escapes its message without breaking \\textbackslash{}',
+    captured.latex.includes('\\textbackslash{}begin\\{figure\\}') && !captured.latex.includes('\\textbackslash\\{\\}'),
+    captured.latex);
 
   // 6. an End before Preamble does not count; the first End after it closes the body
   const p4 = mk('p4', ['Paper 4'], null);

@@ -1938,16 +1938,9 @@ async function noteSkippedTodo(
 }
 
 function buildVisibleWarningBlock(message: string): string {
-  const escapedMessage = message
-    .replace(/\\/g, '\\textbackslash{}')
-    .replace(/\{/g, '\\{')
-    .replace(/\}/g, '\\}')
-    .replace(/_/g, '\\_')
-    .replace(/%/g, '\\%')
-    .replace(/&/g, '\\&')
-    .replace(/#/g, '\\#')
-    .replace(/\$/g, '\\$')
-    .replace(/\^/g, '\\textasciicircum{}');
+  // One pass, not a chain of replaces: chaining escaped the braces of the `\textbackslash{}` it had
+  // just inserted, so `\begin{figure}` rendered as `\textbackslash\{\}begin\{figure\}` in the box.
+  const escapedMessage = escapePlainTextSegment(message);
 
   return [
     '\\begin{center}',
