@@ -1157,6 +1157,12 @@ async function getBoundaryBlock(
     // Powerup bookkeeping rems (a heading's Size, a todo's Status) are never boundary content.
     if (await isBookkeepingRem(rem)) return;
     if (await isIgnoredRem(plugin, rem, context)) return;
+    // Nor is Rem2Tex's own output: a paragraph export left under Preamble would otherwise fold a
+    // second \documentclass / \begin{document} into the boundary block.
+    if (isRem2TexOutputRem(rem)) {
+      if (context.log) context.log.counts.outputRemsSkipped += 1;
+      return;
+    }
 
     const codeLine = await richTextToString(plugin, rem.text, { codeOnly: true });
     const codeBackLine = await richTextToString(plugin, rem.backText, { codeOnly: true });
@@ -1598,6 +1604,15 @@ async function emitTodoChildrenAsCommentTree(
   const lead = leadingSpacesForTodoCommentDepth(depth);
   for (const child of children) {
     if (await isTodoHeadingMetadataChild(child)) {
+      continue;
+    }
+    if (context.skipRemSubtreeIds?.has(child._id)) {
+      continue;
+    }
+    // Rem2Tex's own exports are never comment-tree content either (a paragraph export under a
+    // todo would otherwise be re-emitted, and grow, on every run).
+    if (isRem2TexOutputRem(child)) {
+      if (context.log) context.log.counts.outputRemsSkipped += 1;
       continue;
     }
     if (await isIgnoredRem(plugin, child, context)) {
@@ -2338,6 +2353,26 @@ export async function runParagraphToTexConversion(
     }
 
     const latex = lines.join('\n').trim();
+    if (!latex) {
+      // Writing an empty code block and toasting success hides the reason (the focused rem is
+      // Rem2Tex's own output, is ignore-tagged, or simply has nothing to export).
+      const title = flattenRawTitleText(paragraphRem.text).trim() || '(untitled)';
+      const reason = isRem2TexOutputRem(paragraphRem)
+        ? `"${title}" is one of Rem2Tex's own export rems, which are never exported again.`
+        : context.ignoredRemIds?.has(paragraphRem._id)
+          ? `"${title}" carries the ${REM2TEX_IGNORE_TAG} tag, so it and its subtree are skipped.`
+          : `"${title}" and its descendants produced no LaTeX (empty rem, or everything under it is skipped).`;
+      throw new Rem2TexConversionError({
+        code: 'NOTHING_TO_EXPORT',
+        headline: 'Nothing to export',
+        whatHappened: reason,
+        sourceRemId: paragraphRem._id,
+        sourceRemTitle: title,
+        hints: [
+          `Run the command on a rem with content; remove the ${REM2TEX_IGNORE_TAG} tag if you meant to export this one.`,
+        ],
+      });
+    }
     return createParagraphLatexExport(plugin, paragraphRem, latex);
   } catch (error) {
     if (isRem2TexConversionError(error)) {

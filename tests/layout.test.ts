@@ -1,4 +1,4 @@
-import { runRem2TexConversion, isRem2TexConversionError } from '../src/lib/rem2tex';
+import { runRem2TexConversion, runParagraphToTexConversion, isRem2TexConversionError } from '../src/lib/rem2tex';
 import { createFakeKb, code, heading, suite } from './fake-kb';
 
 /** Paper layout (Preamble/End anchors, any child as starting point), the Paper/Log output shape, the Log text. */
@@ -167,6 +167,38 @@ export async function run(): Promise<number> {
   captured.latex = '';
   const res9b = await runRem2TexConversion(plugin, { parentRem: p9 });
   t.check('childless Preamble with a code block on its back text works', res9b.status === 'success' && captured.latex === '\\documentclass{article}\n\nbody\n\nE', JSON.stringify(res9b) + '\n' + captured.latex);
+
+  // 10. Rem2Tex's own output never re-enters an export, wherever it sits (review findings, 2026-09-04)
+  const p10 = mk('p10', ['Paper 10'], null);
+  const p10pre = mk('p10pre', ['Preamble'], 'p10');
+  mk('p10pre1', [code('\\documentclass{article}')], 'p10pre');
+  const oldPara = mk('p10old', ['Rem2Tex paragraph 01:00 PM 01-01-2026'], 'p10pre'); // a check-run left under Preamble
+  mk('p10oldcode', [code('\\documentclass{article}\nSTALE')], 'p10old');
+  const p10todo = mk('p10todo', ['fix the intro'], 'p10', { isTodo: async () => true, getTodoStatus: async () => 'Unfinished' });
+  mk('p10todonote', ['sub note'], 'p10todo');
+  const oldPara2 = mk('p10old2', ['Rem2Tex paragraph 02:00 PM 02-02-2026'], 'p10todo'); // and one under a todo
+  mk('p10old2code', [code('OLD')], oldPara2._id);
+  mk('p10end', ['End'], 'p10');
+  mk('p10end1', [code('\\end{document}')], 'p10end');
+  captured.latex = '';
+  captured.log = '';
+  const res10 = await runRem2TexConversion(plugin, { parentRem: p10 });
+  t.equal('an old paragraph export under Preamble / under a todo is never folded back in', captured.latex,
+    ['\\documentclass{article}', '', '% TODO [ ] fix the intro', ' %  - sub note', '', '\\end{document}'].join('\n'));
+  t.check('both skipped exports are counted in the Log', res10.status === 'success' && /Earlier Rem2Tex export rems found inside the body and skipped: 2/.test(captured.log), captured.log);
+  void oldPara;
+
+  // 11. Paragraph export with nothing to emit reports why instead of writing an empty block
+  const expectThrow = async (name: string, fn: () => Promise<unknown>, codeExpected: string) => {
+    try {
+      await fn();
+      t.check(name, false, 'no throw');
+    } catch (e: any) {
+      t.check(name, isRem2TexConversionError(e) && e.code === codeExpected, `got ${isRem2TexConversionError(e) ? e.code : e?.message}`);
+    }
+  };
+  await expectThrow('paragraph export on one of Rem2Tex\'s own export rems → NOTHING_TO_EXPORT', () => runParagraphToTexConversion(plugin, { paragraphRem: oldPara2 }), 'NOTHING_TO_EXPORT');
+  await expectThrow('paragraph export on an empty rem → NOTHING_TO_EXPORT', () => runParagraphToTexConversion(plugin, { paragraphRem: mk('blank', [''], null) }), 'NOTHING_TO_EXPORT');
 
   return t.failures();
 }
