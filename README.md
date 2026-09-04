@@ -15,9 +15,10 @@ into a complete `.tex` document and writes it — together with a readable conve
 into your knowledge base.
 
 > [!IMPORTANT]
-> **Rem2Tex only ever adds.** It never edits or deletes your rems. Each export creates a new
-> `Rem2Tex <timestamp>` rem under your paper (with the document and a log as code blocks); everything
-> else in your outline is read, not touched.
+> **Exports only ever add.** A conversion creates a new `Rem2Tex <timestamp>` rem under your paper
+> (holding the document and a log) and never edits or deletes anything else — your outline is read,
+> not touched. The one command that modifies a rem is `/rem2tex-ignore`, which adds or removes the
+> `Rem2Tex-ignore` tag on the rem you run it on (and creates that tag rem the first time).
 
 > [!WARNING]
 > **Vibe-coded — experimental.** Rem2Tex was built largely by prompting an AI assistant, with light
@@ -73,7 +74,8 @@ into your knowledge base.
 ### Paragraph export
 `Rem2Tex: Paragraph to TeX` converts just the focused rem and its descendants with the same body
 rules (all todos as comments) and adds a `Rem2Tex paragraph <timestamp>` child with the LaTeX. Handy
-for one section; it writes no log.
+for one section; it writes no log. If the rem yields nothing — one of Rem2Tex's own export rems, an
+ignore-tagged rem, or an empty one — nothing is written and the toast says which.
 
 ---
 
@@ -157,8 +159,9 @@ Copy the log into a bug report when asking for help.
 (front or back text); if a boundary rem has no code at all, its descendants' plain text is used
 instead. When a boundary subtree mixes code blocks and plain-text rems the code wins and each
 plain-text line is appended as a `% REM2TEX: … not exported` comment (and listed as a warning) so
-nothing disappears silently. A `Preamble`/`End` rem with no children is empty unless the block sits on
-its back text — its own title is never exported. Remnote bookkeeping (`Size`, `Language`, trailing
+nothing disappears silently. The boundary rem's own **back text** counts as the block whether or not
+it has children, while its front text (the word `Preamble` / `End`) is never exported — so a boundary
+rem with nothing else is empty. Remnote bookkeeping (`Size`, `Language`, trailing
 `true`/`false`/`latex` lines) is filtered out.
 
 ### Todo details
@@ -184,11 +187,11 @@ The tag is the **top-level** rem named exactly `Rem2Tex-ignore` (the toggle comm
 Protected as-is: LaTeX commands with their `[…]`/`{…}` arguments, `$…$`, `$$…$$`, `\(…\)`, `\[…\]`, and `\begin{…}…\end{…}` environments (nested same-name environments included). Everything else has `{ } $ & # % _ ^ \` escaped. Remnote math elements become `$…$`, or `$$…$$` when marked as block; inside `equation`/`align`/`gather`/`multline` (and starred variants) per-line `$…$` wrappers are removed and blank lines before `\label` collapsed. Body rems use their main text only; `Preamble`/`End` and figure children may also use back text.
 
 ### Errors and warnings
-Toast only, nothing written: no focused rem (`NO_FOCUSED_REM`, `INACCESSIBLE_REM`); the focused rem is not a paper and neither is its parent (`NOT_A_PAPER` — the toast says what is missing on each: no `Preamble`, no `End` after it, or nothing between them).
+Toast only, nothing written: no focused rem (`NO_FOCUSED_REM`, `INACCESSIBLE_REM`); the focused rem is not a paper and neither is its parent (`NOT_A_PAPER` — the toast says what is missing on each: no `Preamble`, no `End` after it, or nothing between them); the Paragraph command found nothing to export (`NOTHING_TO_EXPORT` — one of Rem2Tex's own export rems, an ignore-tagged rem, or an empty one).
 
-Written into the log (an export rem with only the `Log` rem; the toast says to read it): an empty `Preamble`/`End` block (`EMPTY_BOUNDARY_BLOCK`); an unexpected failure while converting a body rem (`REM_CONVERSION_FAILED` — the log names the rem, its section and path).
+Written into the log (an export rem with only the `Log` rem; the toast says to read it): an empty `Preamble`/`End` block (`EMPTY_BOUNDARY_BLOCK`); an unexpected failure while converting a body rem (`REM_CONVERSION_FAILED` — the log names the rem, its section and path); any other unexpected failure inside the conversion (`EXPORT_FAILED`).
 
-Warnings (conversion continues; counted in the toast, listed in the log): an image rem without a figure/table block (a `REM2TEX WARNING` box is inserted); an image rem's children that are not figure/table blocks (not exported); plain-text lines under `Preamble`/`End` that lost to a code block; a todo skipped by the mode together with non-todo descendants.
+Warnings (conversion continues; counted in the toast, listed in the log): an image rem without a figure/table block (a `REM2TEX WARNING` box is inserted); an image rem's children that are not figure/table blocks (not exported); plain-text lines under `Preamble`/`End` that lost to a code block; a todo skipped by the mode together with non-todo descendants; a heading rem with no title (no sectioning command is emitted, its children still are).
 
 ---
 
