@@ -1393,7 +1393,17 @@ async function todoComment(
     log: context.log,
   });
   const cleaned = stripTodoCommentArtifactCitations(text);
-  return cleaned ? `% TODO ${marker} ${cleaned}` : `% TODO ${marker}`;
+  if (!cleaned) return `% TODO ${marker}`;
+  // Every physical line must carry its own `%`. A lone newline survives the whitespace collapse
+  // above (a soft line break, or a pin to a multi-line code block resolved as text), and an
+  // unprefixed continuation line would otherwise be emitted as real LaTeX body content.
+  const [first, ...rest] = cleaned.split(/\r?\n/);
+  const lines = [`% TODO ${marker} ${first}`.trimEnd()];
+  for (const line of rest) {
+    const trimmed = line.trim();
+    if (trimmed.length > 0) lines.push(`% ${trimmed}`);
+  }
+  return lines.join('\n');
 }
 
 async function shouldExportTodoAsComment(

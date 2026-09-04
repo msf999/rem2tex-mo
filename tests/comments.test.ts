@@ -66,5 +66,44 @@ export async function run(): Promise<number> {
 
   await runParagraphToTexConversion(plugin, { paragraphRem: root });
   t.equal('comment rems end-to-end', captured.latex, expected);
+
+  // Every physical line of a todo comment must start with `%`: a lone newline in the todo text —
+  // a soft break, or a pin to a multi-line code block resolved as text — used to leak its
+  // continuation lines into the document as real LaTeX (review finding, 2026-09-04).
+  const kb2 = createFakeKb();
+  const root2 = kb2.mk('root2', ['P'], null);
+  kb2.mk('fig', [code('\\begin{figure}\n\\centering\n\\includegraphics{x}\n\\end{figure}')], 'root2');
+  kb2.mk('t-multi', ['fix this\nand that'], 'root2', todo);
+  kb2.mk('t-pin', ['caption of ', pin('fig')], 'root2', todo);
+  kb2.mk('t-outer', ['outer'], 'root2', todo);
+  kb2.mk('t-inner', ['nested\nsecond line'], 't-outer', todo);
+  await runParagraphToTexConversion(kb2.plugin, { paragraphRem: root2 });
+  t.equal(
+    'multi-line todo text and a pin to a multi-line code block stay fully commented (top level and nested)',
+    kb2.captured.latex,
+    [
+      'P',
+      '',
+      '\\begin{figure}',
+      '\\centering',
+      '\\includegraphics{x}',
+      '\\end{figure}',
+      '',
+      '% TODO [ ] fix this',
+      '% and that',
+      '% TODO [ ] caption of \\begin{figure}',
+      '% \\centering',
+      '% \\includegraphics{x}',
+      '% \\end{figure}',
+      '% TODO [ ] outer',
+      ' % TODO [ ] nested',
+      ' % second line',
+    ].join('\n')
+  );
+  t.check(
+    'no line of the export is uncommented LaTeX carried over from a todo',
+    kb2.captured.latex.split('\n').filter((l, i) => i > 6 && l.trim() && !l.trim().startsWith('%')).length === 0,
+    kb2.captured.latex
+  );
   return t.failures();
 }
