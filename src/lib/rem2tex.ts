@@ -2004,17 +2004,28 @@ async function serializeNode(
       rem,
       context
     );
-    if (context.log && nonMediaChildren.length > 0) {
+    // The image rem's own prose (a caption typed beside the image) is never exported either — warn
+    // about it exactly like its non-media children, so nothing disappears without a trace.
+    const ownCaption = (await richTextToString(plugin, rem.text, {
+      hierarchyRemIds: context.hierarchyRemIds,
+      log: context.log,
+    }))
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (context.log && (nonMediaChildren.length > 0 || ownCaption)) {
       const imageTitle = flattenRawTitleText(rem.text).trim() || '(image rem)';
-      let path: string | undefined;
-      try {
-        path = (await getRelativeSourceRemHierarchy(plugin, rem, context))?.join(' > ');
-      } catch {
-        path = undefined;
+      const path = await safeHierarchyPath(plugin, rem, context);
+      const where = `Image rem "${imageTitle}"${path && path !== imageTitle ? ` (${path})` : ''}`;
+      if (ownCaption) {
+        context.log.warn(
+          `${where}: its own text was not exported (only figure/table code blocks under an image rem are): "${ownCaption.length > 120 ? `${ownCaption.slice(0, 119)}…` : ownCaption}"`
+        );
       }
-      context.log.warn(
-        `Image rem "${imageTitle}"${path && path !== imageTitle ? ` (${path})` : ''}: ${nonMediaChildren.length} child rem(s) that are not figure/table blocks were not exported (only figure/table code blocks under an image rem are): ${quoteTitles(nonMediaChildren)}`
-      );
+      if (nonMediaChildren.length > 0) {
+        context.log.warn(
+          `${where}: ${nonMediaChildren.length} child rem(s) that are not figure/table blocks were not exported (only figure/table code blocks under an image rem are): ${quoteTitles(nonMediaChildren)}`
+        );
+      }
     }
     if (mediaBlocks.length === 0) {
       const remTitle = await getRemTitle(plugin, rem, context);
@@ -2312,7 +2323,18 @@ export async function runRem2TexConversion(
   log.info(
     `Children of the paper rem: ${childCount}; "${REQUIRED_PREAMBLE_NAME}" is child ${layout.ignoredBefore.length + 1}, "${REQUIRED_END_NAME}" is child ${layout.ignoredBefore.length + layout.bodyRems.length + 2}`
   );
-  log.info(`Body rems (${layout.bodyRems.length}): ${await titlesForLog(plugin, layout.bodyRems, context)}`);
+  // Rem2Tex's own exports sit between Preamble and End when the folder was created before End, but
+  // they are skipped (§4.1) — list them apart so the Structure section matches what is converted.
+  const convertedBodyRems = layout.bodyRems.filter((rem) => !isRem2TexOutputRem(rem));
+  const skippedBodyExports = layout.bodyRems.filter((rem) => isRem2TexOutputRem(rem));
+  log.info(
+    `Body rems (${convertedBodyRems.length}): ${await titlesForLog(plugin, convertedBodyRems, context)}`
+  );
+  if (skippedBodyExports.length > 0) {
+    log.info(
+      `Ignored inside the body — earlier Rem2Tex exports (${skippedBodyExports.length}): ${await titlesForLog(plugin, skippedBodyExports, context)}`
+    );
+  }
   if (layout.ignoredBefore.length > 0) {
     log.info(
       `Ignored before ${REQUIRED_PREAMBLE_NAME} (${layout.ignoredBefore.length}): ${await titlesForLog(plugin, layout.ignoredBefore, context)}`
