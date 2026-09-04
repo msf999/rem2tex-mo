@@ -65,13 +65,36 @@ export async function run(): Promise<number> {
   await runRem2TexConversion(plugin, { parentRem: paper });
   t.check('after removal the rem exports again; the still-tagged section stays hidden', captured.latex.includes('visible paragraph') && !captured.latex.includes('kept prose'), captured.latex);
 
-  // Only the top-level tag rem counts: a same-named tag rem nested elsewhere is not honoured.
+  // Only the top-level tag rem counts: a same-named tag rem nested elsewhere is not honoured —
+  // and the toggle command agrees with that, instead of "removing" the inert look-alike and
+  // claiming the rem exports again (review finding, 2026-09-04).
   mk('nestedTag', [REM2TEX_IGNORE_TAG], 'sec3');
   const p3 = mk('p3', ['tagged with a nested tag rem'], 'sec3');
   p3.tags.push('nestedTag');
   captured.latex = '';
   await runRem2TexConversion(plugin, { parentRem: paper });
   t.check('a nested (non-top-level) tag rem is ignored by design', captured.latex.includes('tagged with a nested tag rem'), captured.latex);
+  const r4 = await toggleIgnoreTag(plugin, p3);
+  t.check('toggle on a rem carrying only a nested look-alike tag ADDS the canonical tag', r4 === 'added' && p3.tags.includes(tagRem._id) && p3.tags.includes('nestedTag'), JSON.stringify({ r4, tags: p3.tags }));
+  captured.latex = '';
+  await runRem2TexConversion(plugin, { parentRem: paper });
+  t.check('and the rem is then actually hidden', !captured.latex.includes('tagged with a nested tag rem'), captured.latex);
+
+  // An ignore-tagged figure/table child of an image rem is skipped and listed (review finding).
+  const imgPaper = mk('ip', ['Image paper'], null);
+  mk('ippre', ['Preamble'], 'ip');
+  mk('ippre1', [code('P')], 'ippre');
+  mk('ipimg', [{ i: 'i', url: 'x.png' }], 'ip');
+  mk('ipfigA', [code('\\begin{figure}A\\end{figure}')], 'ipimg');
+  const hiddenFig = mk('ipfigB', [code('\\begin{figure}B-old-version\\end{figure}')], 'ipimg');
+  hiddenFig.tags.push(tagRem._id);
+  mk('ipend', ['End'], 'ip');
+  mk('ipend1', [code('E')], 'ipend');
+  captured.latex = '';
+  captured.log = '';
+  const resImg = await runRem2TexConversion(plugin, { parentRem: imgPaper });
+  t.equal('a tagged figure child of an image rem is not exported', captured.latex, 'P\n\n\\begin{figure}A\\end{figure}\n\nE');
+  t.check('and it is listed in the Log as skipped by the tag', resImg.status === 'success' && /Skipped by Rem2Tex-ignore \(1\)/.test(captured.log) && captured.log.includes('figure/table blocks: 1'), captured.log);
 
   return t.failures();
 }

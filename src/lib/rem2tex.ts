@@ -1457,10 +1457,6 @@ function leadingSpacesForTodoCommentDepth(depth: number): string {
  */
 export const REM2TEX_IGNORE_TAG = 'Rem2Tex-ignore';
 
-function isIgnoreTagRem(rem: Rem): boolean {
-  return flattenRawTitleText(rem.text).trim().toLowerCase() === REM2TEX_IGNORE_TAG.toLowerCase();
-}
-
 /**
  * Ids of every rem tagged with the top-level `Rem2Tex-ignore` rem, fetched once per conversion via
  * the tag's reverse lookup (`taggedRem`). `undefined` when no such tag rem exists — then no
@@ -1500,7 +1496,7 @@ async function isIgnoredRem(
   return true;
 }
 
-/** The KB's `Rem2Tex-ignore` tag rem, if one exists anywhere. */
+/** The KB's canonical `Rem2Tex-ignore` tag rem: the TOP-LEVEL one, which is what exports honour. */
 export async function findIgnoreTagRem(plugin: ReactRNPlugin): Promise<Rem | undefined> {
   return plugin.rem.findByName([REM2TEX_IGNORE_TAG], null);
 }
@@ -1508,22 +1504,27 @@ export async function findIgnoreTagRem(plugin: ReactRNPlugin): Promise<Rem | und
 /**
  * Add the `Rem2Tex-ignore` tag to `rem` (creating the tag rem on first use) or remove it when it is
  * already there. Backs the "Toggle Rem2Tex-ignore" command so the tag name need not be remembered.
+ * Add-vs-remove is decided against the SAME rem exports honour (the top-level tag), so the toast can
+ * never claim a rem "exports again" when a look-alike tag nested elsewhere never hid it.
  */
 export async function toggleIgnoreTag(plugin: ReactRNPlugin, rem: Rem): Promise<'added' | 'removed'> {
-  const existing = (await rem.getTagRems()).find((tag) => isIgnoreTagRem(tag));
-  if (existing) {
-    await rem.removeTag(existing._id);
-    return 'removed';
-  }
-  let tagRem = await findIgnoreTagRem(plugin);
-  if (!tagRem) {
-    tagRem = await plugin.rem.createRem();
-    if (!tagRem) {
-      throw new Error(`Could not create the "${REM2TEX_IGNORE_TAG}" tag rem.`);
+  const canonical = await findIgnoreTagRem(plugin);
+  if (canonical) {
+    const tagged = (await rem.getTagRems()).some((tag) => tag._id === canonical._id);
+    if (tagged) {
+      await rem.removeTag(canonical._id);
+      return 'removed';
     }
-    await tagRem.setText([REM2TEX_IGNORE_TAG]);
+    await rem.addTag(canonical);
+    return 'added';
   }
-  await rem.addTag(tagRem);
+  // No top-level tag rem yet: create it, so later exports (and this command) can find it by name.
+  const created = await plugin.rem.createRem();
+  if (!created) {
+    throw new Error(`Could not create the "${REM2TEX_IGNORE_TAG}" tag rem.`);
+  }
+  await created.setText([REM2TEX_IGNORE_TAG]);
+  await rem.addTag(created);
   return 'added';
 }
 
@@ -1806,14 +1807,17 @@ function inferMediaTypeFromLatex(codeText: string): 'figure' | 'table' | undefin
 async function getMediaCodeBlocksFromImmediateChildren(
   plugin: ReactRNPlugin,
   rem: Rem,
-  hierarchyRemIds?: Set<string>
+  context: Rem2TexConversionContext
 ): Promise<{ blocks: string[]; nonMediaChildren: Rem[] }> {
+  const hierarchyRemIds = context.hierarchyRemIds;
   const children = await rem.getChildrenRem();
   const blocks: string[] = [];
   const nonMediaChildren: Rem[] = [];
 
   for (const child of children) {
     if (await isBookkeepingRem(child)) continue;
+    // The ignore tag hides a media child like any other rem (and is listed in the Log).
+    if (await isIgnoredRem(plugin, child, context)) continue;
     let found = false;
     const fromText = await richTextToString(plugin, child.text, { codeOnly: true });
     const sanitizedFromText = fromText ? stripTrailingCodeMetadataArtifacts(fromText) : '';
@@ -1950,7 +1954,7 @@ async function serializeNode(
     const { blocks: mediaBlocks, nonMediaChildren } = await getMediaCodeBlocksFromImmediateChildren(
       plugin,
       rem,
-      context.hierarchyRemIds
+      context
     );
     if (context.log && nonMediaChildren.length > 0) {
       const imageTitle = flattenRawTitleText(rem.text).trim() || '(image rem)';
