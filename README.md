@@ -58,12 +58,9 @@ its parent.
 
 ## Setup
 
-1. **Install.** Rem2Tex is unlisted: load it from the dev server (`npm run dev`, then in Remnote
-   **Settings → Plugins → Build → `http://localhost:8080`**), or build `PluginZip.zip`
-   (`npm run build`) and load that as a local plugin. There are no settings to fill in.
-2. **Structure your paper** as above: `Preamble` and `End` children, each with a code block, and your
+1. **Structure your paper** as above: `Preamble` and `End` children, each with a code block, and your
    sections between them.
-3. **Type `/rem2tex`** on the paper rem (or any child), then copy the `Paper` code block into your
+2. **Type `/rem2tex`** on the paper rem (or any child), then copy the `Paper` code block into your
    `.tex` project — and read the `Log` if the toast asked you to.
 
 ## Commands
@@ -138,12 +135,3 @@ part-way through the conversion, still writes an export rem with the log in it.
 - **`Rem2Tex-ignore` must be the top-level rem** with exactly that name (the toggle command creates it
   there); a same-named rem nested elsewhere is not recognised.
 - **Remnote's own bold/italic/underline are not converted** — type the LaTeX you want.
-
----
-
-## Development
-
-- `npm ci` on **Node 16.15.1** (`.nvmrc`), then `npm run dev` for the dev server on port 8080.
-- `npx tsc --noEmit` type-checks `src/` and `tests/`; `npm test` runs the exporter against a fake
-  knowledge base (no framework).
-- `npm run build` validates the manifest and writes `PluginZip.zip` (removing the old one first).
