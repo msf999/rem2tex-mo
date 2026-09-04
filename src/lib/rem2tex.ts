@@ -1184,22 +1184,23 @@ async function getBoundaryBlock(
     }
   };
 
-  if (children.length > 0) {
-    for (const child of children) {
-      await collectDescendantText(child);
-    }
-  } else {
-    // A boundary rem without children: only its back text can hold the block — the front text is
-    // the "Preamble" / "End" title itself, never LaTeX (until 2026-09-03 the title was exported).
-    const backCode = await richTextToString(plugin, boundaryRem.backText, { codeOnly: true });
-    if (backCode) {
-      codeLines.push(backCode);
-    } else {
-      const backPlain = await richTextToString(plugin, boundaryRem.backText, {
-        hierarchyRemIds: context.hierarchyRemIds,
-      });
-      if (backPlain) plainLines.push(backPlain);
-    }
+  // The boundary rem's own back text always counts: it holds the block when the rem has no
+  // children, and must not be lost just because a note (or a bookkeeping rem) sits under it.
+  const ownBackCode = await richTextToString(plugin, boundaryRem.backText, { codeOnly: true });
+  if (ownBackCode) {
+    codeLines.push(ownBackCode);
+  }
+
+  for (const child of children) {
+    await collectDescendantText(child);
+  }
+  if (!ownBackCode) {
+    // Plain-text fallback for the boundary rem itself. Its FRONT text is the "Preamble" / "End"
+    // title, never the block (until 2026-09-03 that title was exported as the preamble).
+    const ownBackPlain = await richTextToString(plugin, boundaryRem.backText, {
+      hierarchyRemIds: context.hierarchyRemIds,
+    });
+    if (ownBackPlain) plainLines.push(ownBackPlain);
   }
 
   // Code blocks take precedence over plain text. When both exist, the plain lines are not lost
@@ -1306,15 +1307,33 @@ async function findPaperLayout(
 }
 
 /** One-line diagnosis of why `rem` is not a paper (for the NOT_A_PAPER toast). */
-async function explainNotAPaper(plugin: ReactRNPlugin, rem: Rem): Promise<string> {
+async function explainNotAPaper(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  anchorRem?: Rem
+): Promise<string> {
   const children = await rem.getChildrenRem();
   const titles: string[] = [];
   for (const child of children) titles.push(await getRemTitle(plugin, child));
-  const preambleIndex = titles.indexOf(REQUIRED_PREAMBLE_NAME);
+  // Mirror findPaperLayout: when the command was started on a `Preamble` child, that rem is the
+  // anchor, so the diagnosis must be about it and not about the first Preamble in the outline.
+  let preambleIndex = -1;
+  if (anchorRem) {
+    const anchorIndex = children.findIndex((child) => child._id === anchorRem._id);
+    if (anchorIndex !== -1 && titles[anchorIndex] === REQUIRED_PREAMBLE_NAME) preambleIndex = anchorIndex;
+  }
+  if (preambleIndex === -1) preambleIndex = titles.indexOf(REQUIRED_PREAMBLE_NAME);
   if (preambleIndex === -1) return `no child titled "${REQUIRED_PREAMBLE_NAME}"`;
   const endIndex = titles.indexOf(REQUIRED_END_NAME, preambleIndex + 1);
-  if (endIndex === -1) return `no child titled "${REQUIRED_END_NAME}" after "${REQUIRED_PREAMBLE_NAME}"`;
-  return `nothing between "${REQUIRED_PREAMBLE_NAME}" and "${REQUIRED_END_NAME}"`;
+  if (endIndex === -1) {
+    return anchorRem && preambleIndex === children.findIndex((child) => child._id === anchorRem._id)
+      ? `no child titled "${REQUIRED_END_NAME}" after this "${REQUIRED_PREAMBLE_NAME}"`
+      : `no child titled "${REQUIRED_END_NAME}" after "${REQUIRED_PREAMBLE_NAME}"`;
+  }
+  if (endIndex - preambleIndex < 2) {
+    return `nothing between "${REQUIRED_PREAMBLE_NAME}" and "${REQUIRED_END_NAME}"`;
+  }
+  return `a "${REQUIRED_PREAMBLE_NAME}"/"${REQUIRED_END_NAME}" pair that does not enclose the rem the command started on`;
 }
 
 /**
@@ -1338,7 +1357,7 @@ export async function resolvePaperRoot(
   const focusedTitle = (await getRemTitle(plugin, focusedRem)).trim() || '(untitled)';
   const ownReason = await explainNotAPaper(plugin, focusedRem);
   const parentReason = parent
-    ? `its parent "${(await getRemTitle(plugin, parent)).trim() || '(untitled)'}" has ${await explainNotAPaper(plugin, parent)}`
+    ? `its parent "${(await getRemTitle(plugin, parent)).trim() || '(untitled)'}" has ${await explainNotAPaper(plugin, parent, focusedRem)}`
     : 'it has no parent';
   throw new Rem2TexConversionError({
     code: 'NOT_A_PAPER',
@@ -1686,15 +1705,23 @@ async function enrichConversionErrorWithSourceRem(
   location?: Rem2TexOutlineLocation
 ): Promise<Rem2TexConversionError> {
   const existing = isRem2TexConversionError(error) ? error : undefined;
-  if (
-    existing &&
-    existing.sourceRemId &&
-    existing.sourceRemTextPreview &&
-    existing.sourceRemTitle &&
-    existing.sourceRemHierarchy &&
-    (existing.location || !location)
-  ) {
-    return existing;
+  // An error that already names a rem is final: filling its *missing* fields from an enclosing rem
+  // would mix identities (title of the parent next to the id of the child, for a child whose own
+  // title is empty). Only the outline location may still be added.
+  if (existing && existing.sourceRemId) {
+    if (existing.location || !location) return existing;
+    return new Rem2TexConversionError({
+      code: existing.code,
+      headline: existing.headline,
+      whatHappened: existing.whatHappened,
+      technicalDetail: existing.technicalDetail,
+      location,
+      sourceRemId: existing.sourceRemId,
+      sourceRemTextPreview: existing.sourceRemTextPreview,
+      sourceRemTitle: existing.sourceRemTitle,
+      sourceRemHierarchy: existing.sourceRemHierarchy,
+      hints: existing.hints,
+    });
   }
 
   // Never let the diagnostics themselves throw: the original failure is what matters.
@@ -1862,6 +1889,19 @@ async function getMediaCodeBlocksFromImmediateChildren(
   return { blocks, nonMediaChildren };
 }
 
+/** Hierarchy path for a log line; never throws (diagnostics must not mask the export). */
+async function safeHierarchyPath(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<string | undefined> {
+  try {
+    return (await getRelativeSourceRemHierarchy(plugin, rem, context))?.join(' > ');
+  } catch {
+    return undefined;
+  }
+}
+
 function quoteTitles(rems: Rem[], max = 5): string {
   const titles = rems.slice(0, max).map((r) => `"${flattenRawTitleText(r.text).trim() || '(untitled)'}"`);
   if (rems.length > max) titles.push(`… and ${rems.length - max} more`);
@@ -2022,21 +2062,35 @@ async function serializeNode(
   }
   let { text: title, fromCodeBlock } = titleResult;
   if (isHeading && isTodo) {
-    const rawTodoHeadingTitle = flattenRawTitleText(rem.text).trim();
-    // Todo headings carry internal status pins; prefer raw title text so we
-    // don't serialize those pins as citations (e.g. \cite{Status}).
-    if (rawTodoHeadingTitle.length > 0) {
-      title = rawTodoHeadingTitle;
+    // A todo heading carries RemNote's Status reference. `isBookkeepingRem` already drops it, but
+    // strip any leftover `\cite{Status}` too — keeping the RESOLVED title so math and Zotero
+    // citations inside a heading+todo survive (the raw text would discard them).
+    const cleanedTitle = stripTodoCommentArtifactCitations(title);
+    if (cleanedTitle !== title) {
+      title = cleanedTitle;
       fromCodeBlock = false;
+    }
+    if (!title.trim()) {
+      const rawTodoHeadingTitle = flattenRawTitleText(rem.text).trim();
+      if (rawTodoHeadingTitle.length > 0) {
+        title = rawTodoHeadingTitle;
+        fromCodeBlock = false;
+      }
     }
   }
   if (isHeading) {
-    if (context.log) context.log.counts.headings += 1;
     const headingLevel = Math.min(currentHeadingLevel + 1, HEADING_COMMANDS.length);
     const command = HEADING_COMMANDS[headingLevel - 1];
     if (title) {
+      // Counted only when a sectioning command is actually emitted, so the Log matches the paper.
+      if (context.log) context.log.counts.headings += 1;
       output.push(`\\${command}{${escapeLatex(title)}}`);
       output.push('');
+    } else if (context.log) {
+      const path = await safeHierarchyPath(plugin, rem, context);
+      context.log.warn(
+        `Heading rem with no title${path ? ` (${path})` : ''}: no \\${command} was emitted, but its children were exported.`
+      );
     }
 
     const children = await rem.getChildrenRem();
@@ -2084,24 +2138,26 @@ async function serializeNode(
   const children = await rem.getChildrenRem();
   let emittedAny = Boolean(title);
   for (const child of children) {
-    if (await isIgnoredRem(plugin, child, context)) continue;
-    const childIsHeading = (await child.getFontSize()) !== undefined;
-    if ((await child.isTodo()) && !childIsHeading) {
-      if (await shouldExportTodoAsComment(child, context)) {
-        if (context.log) context.log.counts.todoComments += 1;
-        output.push(await todoComment(plugin, child, context));
-        await emitTodoChildrenAsCommentTree(plugin, child, output, context, 1);
-        emittedAny = true;
-      } else {
-        await noteSkippedTodo(plugin, child, context);
-      }
-      continue;
-    }
-    const childIsComment = !childIsHeading && isCommentRem(child);
-    if (!childIsComment && output.length > 0 && output[output.length - 1] !== '') {
-      output.push('');
-    }
+    // Everything about a child runs inside its own try, so any failure — reading its font size or
+    // todo status, building its comment tree — is reported against THAT child, not this parent.
     try {
+      if (await isIgnoredRem(plugin, child, context)) continue;
+      const childIsHeading = (await child.getFontSize()) !== undefined;
+      if ((await child.isTodo()) && !childIsHeading) {
+        if (await shouldExportTodoAsComment(child, context)) {
+          if (context.log) context.log.counts.todoComments += 1;
+          output.push(await todoComment(plugin, child, context));
+          await emitTodoChildrenAsCommentTree(plugin, child, output, context, 1);
+          emittedAny = true;
+        } else {
+          await noteSkippedTodo(plugin, child, context);
+        }
+        continue;
+      }
+      const childIsComment = !childIsHeading && isCommentRem(child);
+      if (!childIsComment && output.length > 0 && output[output.length - 1] !== '') {
+        output.push('');
+      }
       await serializeNode(
         plugin,
         child,
@@ -2111,10 +2167,10 @@ async function serializeNode(
         currentSectionTitle,
         currentSubsectionTitle
       );
+      emittedAny = true;
     } catch (error) {
       throw await enrichConversionErrorWithSourceRem(plugin, error, child, context, outlineLocation);
     }
-    emittedAny = true;
   }
 
   // Close the paragraph so the next sibling starts on its own.
@@ -2208,9 +2264,13 @@ function describeTodoMode(mode: Rem2TexTodoExportMode): string {
 
 async function titlesForLog(plugin: ReactRNPlugin, rems: Rem[], context: Rem2TexConversionContext): Promise<string> {
   const MAX = 12;
+  const LABEL_MAX = 120;
   const titles: string[] = [];
   for (const rem of rems.slice(0, MAX)) {
-    titles.push(`"${(await getRemTitle(plugin, rem, context)).trim() || '(untitled)'}"`);
+    // Fold and cap like every other log label: a top-level code block would otherwise dump its
+    // whole multi-line text into the Log's structure line.
+    const raw = (await getRemTitle(plugin, rem, context)).replace(/\s+/g, ' ').trim() || '(untitled)';
+    titles.push(`"${raw.length > LABEL_MAX ? `${raw.slice(0, LABEL_MAX - 1)}…` : raw}"`);
   }
   if (rems.length > MAX) titles.push(`… and ${rems.length - MAX} more`);
   return titles.join(', ');

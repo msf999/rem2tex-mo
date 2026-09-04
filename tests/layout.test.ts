@@ -200,5 +200,35 @@ export async function run(): Promise<number> {
   await expectThrow('paragraph export on one of Rem2Tex\'s own export rems → NOTHING_TO_EXPORT', () => runParagraphToTexConversion(plugin, { paragraphRem: oldPara2 }), 'NOTHING_TO_EXPORT');
   await expectThrow('paragraph export on an empty rem → NOTHING_TO_EXPORT', () => runParagraphToTexConversion(plugin, { paragraphRem: mk('blank', [''], null) }), 'NOTHING_TO_EXPORT');
 
+  // 12. A boundary rem's back-text code block counts even when the rem has children (review finding)
+  const p11 = mk('p11', ['Paper 11'], null);
+  const p11pre = mk('p11pre', ['Preamble'], 'p11');
+  p11pre.backText = [code('\\documentclass{article}')];
+  mk('p11note', ['journal template v2'], 'p11pre'); // a plain note child used to win over the back text
+  mk('p11body', ['body'], 'p11');
+  mk('p11end', ['End'], 'p11');
+  mk('p11end1', [code('E')], 'p11end');
+  captured.latex = '';
+  captured.log = '';
+  const res11 = await runRem2TexConversion(plugin, { parentRem: p11 });
+  t.check('back-text code block wins over a plain note child, which is kept as a % REM2TEX comment',
+    res11.status === 'success' && captured.latex.startsWith('\\documentclass{article}\n% REM2TEX: plain-text rem under Preamble') && captured.latex.includes('journal template v2') && captured.latex.endsWith('body\n\nE'),
+    captured.latex);
+
+  // 13. A heading with no title is not counted and is warned about (Log matches the paper)
+  const p12 = mk('p12', ['Paper 12'], null);
+  mk('p12pre', ['Preamble'], 'p12');
+  mk('p12pre1', [code('P')], 'p12pre');
+  const emptyHeading = mk('p12h', [''], 'p12', heading);
+  mk('p12hchild', ['orphaned prose'], emptyHeading._id);
+  mk('p12end', ['End'], 'p12');
+  mk('p12end1', [code('E')], 'p12end');
+  captured.latex = '';
+  captured.log = '';
+  const res12 = await runRem2TexConversion(plugin, { parentRem: p12 });
+  t.check('empty-titled heading: no \\section, not counted, warned',
+    res12.status === 'success' && !captured.latex.includes('\\section') && /Headings: 0/.test(captured.log) && /Heading rem with no title/.test(captured.log) && captured.latex.includes('orphaned prose'),
+    JSON.stringify(res12) + '\n' + captured.latex + '\n' + captured.log);
+
   return t.failures();
 }
