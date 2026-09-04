@@ -6,20 +6,20 @@ export async function run(): Promise<number> {
   const t = suite('paper layout, output shape, log');
   const { rems, mk, plugin, captured } = createFakeKb();
 
-  // mo's structure: Paper › Scratchpad, Preamble, Abstract, …, End, Supplementary Information
+  // A realistic paper: Paper › Scratchpad, Preamble, Abstract, …, End, Supplementary Information
   const paper = mk('paper', ['Paper'], null);
   mk('scratch', ['Scratchpad'], 'paper');
   mk('scratch1', ['random thoughts & drafts'], 'scratch');
   const pre = mk('pre', ['Preamble'], 'paper');
-  mk('pre1', [code('\\documentclass{article}\n\\title{Nitrides}\n\\author{mo}\n\\begin{document}')], 'pre');
+  mk('pre1', [code('\\documentclass{article}\n\\title{A Sample Paper}\n\\author{A. Author}\n\\begin{document}')], 'pre');
   mk('abs', ['Abstract'], 'paper', heading);
-  mk('abs1', ['We study nitrides.'], 'abs');
+  mk('abs1', ['We study the topic.'], 'abs');
   mk('intro', ['Introduction'], 'paper', heading);
   mk('intro1', ['Renewed interest.'], 'intro');
   mk('end', ['End'], 'paper');
   mk('end1', [code('\\end{document}')], 'end');
   mk('si', ['Supplementary Information'], 'paper', heading); // after End → ignored
-  const expected = ['\\documentclass{article}', '\\title{Nitrides}', '\\author{mo}', '\\begin{document}', '', '\\section{Abstract}', '', 'We study nitrides.', '', '\\section{Introduction}', '', 'Renewed interest.', '', '\\end{document}'].join('\n');
+  const expected = ['\\documentclass{article}', '\\title{A Sample Paper}', '\\author{A. Author}', '\\begin{document}', '', '\\section{Abstract}', '', 'We study the topic.', '', '\\section{Introduction}', '', 'Renewed interest.', '', '\\end{document}'].join('\n');
 
   // 1. from the paper rem
   captured.latex = '';
@@ -47,7 +47,7 @@ export async function run(): Promise<number> {
   captured.log = '';
   const resAbs = await runRem2TexConversion(plugin, { parentRem: rems['abs'] });
   t.equal('Abstract (a sibling) focused: converts the parent paper', captured.latex, expected);
-  const needles = ['Rem2Tex conversion log', 'command started on its child "Abstract"', 'Ignored before Preamble (1): "Scratchpad"', 'Ignored after End (', '"Supplementary Information"', 'Title: Nitrides', 'Author(s): mo', 'Headings: 2', 'SUCCESS'];
+  const needles = ['Rem2Tex conversion log', 'command started on its child "Abstract"', 'Ignored before Preamble (1): "Scratchpad"', 'Ignored after End (', '"Supplementary Information"', 'Title: A Sample Paper', 'Author(s): A. Author', 'Headings: 2', 'SUCCESS'];
   t.check('log lists setup, structure, preamble metadata, counts and result', resAbs.status === 'success' && needles.every((n) => captured.log.includes(n)), captured.log);
 
   // 3. phase A errors (toasted): NOT_A_PAPER with a diagnosis of the rem and its parent

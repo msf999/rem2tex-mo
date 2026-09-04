@@ -928,7 +928,7 @@ function rawTitleEquals(rem: Rem, expected: string): boolean {
 
 /**
  * The only references Rem2Tex turns into citations are those pointing at (or inside) an item doc
- * under `Zotero/Items` — the tree Remzot maintains, which mo may also add to by hand before a sync
+ * under `Zotero/Items` — the tree Remzot maintains, which you may also add to by hand before a sync
  * (so no powerup tag is required). Walks up from `rem`; returns the item doc (the direct child of
  * `Items` on the path, possibly `rem` itself) or undefined.
  */

@@ -34,10 +34,10 @@ export async function run(): Promise<number> {
   // (d) Zotero item whose title is only a pin → key from the pinned rem's text, not rem_<id>
   mk('z', ['Zotero'], null);
   mk('items', ['Items'], 'z');
-  mk('concept', ['bandgap2019'], null);
+  mk('concept', ['jones2019'], null);
   mk('itemPinTitle', [{ i: 'q', _id: 'concept', pin: true }], 'items');
   const title = await getRemTitle(plugin, { text: ['see ', { i: 'q', _id: 'itemPinTitle', pin: true }] } as any, { hierarchyRemIds: new Set(['para']) } as any);
-  t.equal('(d) item title that is only a pin resolves to the pinned text as key', title, 'see \\cite{bandgap2019}');
+  t.equal('(d) item title that is only a pin resolves to the pinned text as key', title, 'see \\cite{jones2019}');
 
   void pre;
   return t.failures();

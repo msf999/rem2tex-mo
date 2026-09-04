@@ -15,7 +15,7 @@ export async function run(): Promise<number> {
 
   mk('z', ['Zotero'], null, { isDocument: async () => true });
   mk('items', ['Items'], 'z', { isDocument: async () => true });
-  mk('paper1', ['keFirstPrinciplesStudiesElectronic2024'], 'items', { isDocument: async () => true });
+  mk('paper1', ['doeSampleStudyTopic2024'], 'items', { isDocument: async () => true });
   mk('note1', ['a note under the item'], 'paper1');
   mk('handAdded', ['smith2020'], 'items', { isDocument: async () => true }); // added by hand, no powerup
   mk('other', ['Other'], null, { isDocument: async () => true });
@@ -24,7 +24,7 @@ export async function run(): Promise<number> {
   mk('root', ['Paper'], null, { isDocument: async () => true });
   mk('fig1', [code('\\begin{figure}\\label{fig:setup}\\end{figure}')], 'root');
   mk('todo1', ['fix the caption'], 'root', { isTodo: async () => true, getTodoStatus: async () => 'Unfinished' });
-  mk('concept', ['band gap'], null, { isDocument: async () => true });
+  mk('concept', ['shared concept'], null, { isDocument: async () => true });
   mk('statusSlot', ['Status'], null, { isPowerupSlot: async () => true });
 
   const ctx = { hierarchyRemIds: new Set(['root', 'fig1', 'todo1']) }; // paper1 is OUTSIDE the hierarchy
@@ -33,24 +33,24 @@ export async function run(): Promise<number> {
     richTextToString(plugin, text, { hierarchyRemIds: ctx.hierarchyRemIds, todoContentResolvePinsAsText: true } as any);
 
   const cases: Array<[string, () => Promise<string>, string]> = [
-    ["mo's sentence: \\cite{ + pin to Zotero item + }", () => prose(['… \\ce{ZnTiN2} [elaborate]\\cite{', pin('paper1'), '}.']), '… \\ce{ZnTiN2} [elaborate]\\cite{keFirstPrinciplesStudiesElectronic2024}.'],
-    ['bare pin to Zotero item → \\cite', () => prose(['see ', pin('paper1'), '.']), 'see \\cite{keFirstPrinciplesStudiesElectronic2024}.'],
-    ['inline reference to Zotero item → \\cite too', () => prose(['see ', ref('paper1'), '.']), 'see \\cite{keFirstPrinciplesStudiesElectronic2024}.'],
-    ['pin to a note nested under the item → cites the item', () => prose(['see ', pin('note1'), '.']), 'see \\cite{keFirstPrinciplesStudiesElectronic2024}.'],
+    ['typed \\cite{ + pin + } is not doubled, macros untouched', () => prose(['… \\textbf{sample A} [elaborate]\\cite{', pin('paper1'), '}.']), '… \\textbf{sample A} [elaborate]\\cite{doeSampleStudyTopic2024}.'],
+    ['bare pin to Zotero item → \\cite', () => prose(['see ', pin('paper1'), '.']), 'see \\cite{doeSampleStudyTopic2024}.'],
+    ['inline reference to Zotero item → \\cite too', () => prose(['see ', ref('paper1'), '.']), 'see \\cite{doeSampleStudyTopic2024}.'],
+    ['pin to a note nested under the item → cites the item', () => prose(['see ', pin('note1'), '.']), 'see \\cite{doeSampleStudyTopic2024}.'],
     ['hand-added item (no powerup) under Zotero/Items → \\cite', () => prose(['see ', pin('handAdded'), '.']), 'see \\cite{smith2020}.'],
-    ['two Zotero pins inside one \\cite{} → one key list', () => prose(['\\cite{', pin('paper1'), pin('handAdded'), '}']), '\\cite{keFirstPrinciplesStudiesElectronic2024, smith2020}'],
+    ['two Zotero pins inside one \\cite{} → one key list', () => prose(['\\cite{', pin('paper1'), pin('handAdded'), '}']), '\\cite{doeSampleStudyTopic2024, smith2020}'],
     ['"Items" that is not under "Zotero" → pin dropped', () => prose(['see ', pin('fake'), '.']), 'see .'],
     ['pin to the Items doc itself → dropped', () => prose(['see ', pin('items'), '.']), 'see .'],
-    ['pin to a local todo → dropped from prose', () => prose(['Defects matter', pin('todo1'), '.']), 'Defects matter.'],
+    ['pin to a local todo → dropped from prose', () => prose(['This matters', pin('todo1'), '.']), 'This matters.'],
     ['pin to a local figure → dropped from prose', () => prose(['as shown ', pin('fig1'), ' below']), 'as shown  below'],
     ['\\ref{ + pin to figure + } → pin dropped, label must be typed', () => prose(['Fig. \\ref{', pin('fig1'), '}']), 'Fig. \\ref{}'],
     ['pin to an unrelated note → dropped', () => prose(['see ', pin('concept'), '.']), 'see .'],
-    ['inline reference to an unrelated note → its text', () => prose(['the ', ref('concept'), ' matters']), 'the band gap matters'],
+    ['inline reference to an unrelated note → its text', () => prose(['the ', ref('concept'), ' matters']), 'the shared concept matters'],
     ['pin to a bookkeeping (Status slot) rem → dropped', () => prose(['x', pin('statusSlot')]), 'x'],
     ['todo comment: pin to local todo → its text', () => comment(['fix ', pin('todo1')]), 'fix fix the caption'],
     ['todo comment: pin to figure → its text (code text)', () => comment(['caption of ', pin('fig1')]), 'caption of \\begin{figure}\\label{fig:setup}\\end{figure}'],
-    ['todo comment: Zotero pin still cites', () => comment(['read ', pin('paper1')]), 'read \\cite{keFirstPrinciplesStudiesElectronic2024}'],
-    ['todo comment: Status slot ref dropped', () => comment(['Judy: add more', ref('statusSlot')]), 'Judy: add more'],
+    ['todo comment: Zotero pin still cites', () => comment(['read ', pin('paper1')]), 'read \\cite{doeSampleStudyTopic2024}'],
+    ['todo comment: Status slot ref dropped', () => comment(['note: add more', ref('statusSlot')]), 'note: add more'],
     ['typed \\cite{abc} untouched', () => prose(['x \\cite{abc} y']), 'x \\cite{abc} y'],
   ];
   for (const [name, fn, expected] of cases) t.equal(name, await fn(), expected);
