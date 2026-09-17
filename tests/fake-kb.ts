@@ -18,6 +18,9 @@ export function createFakeKb() {
       parent,
       backText: undefined,
       tags: [] as string[],
+      /** `{ powerupCode: { slotCode: richText } }` — what Remzot writes onto a Zotero item doc. */
+      props: {} as Record<string, Record<string, any[]>>,
+      powerups: [] as string[],
       getChildrenRem: async () => Object.values(rems).filter((x: FakeRem) => x.parent === id),
       getDescendants: async () => {
         const out: FakeRem[] = [];
@@ -37,6 +40,14 @@ export function createFakeKb() {
       isTodo: async () => false,
       getTodoStatus: async () => undefined,
       getFontSize: async () => undefined,
+      hasPowerup: async (code: string) => r.powerups.includes(code),
+      getPowerupProperty: async (code: string, slot: string) =>
+        (r.props[code]?.[slot] ?? []).map((el: any) => (typeof el === 'string' ? el : el.text ?? '')).join(''),
+      getPowerupPropertyAsRichText: async (code: string, slot: string) => r.props[code]?.[slot] ?? [],
+      setPowerupProperty: async (code: string, slot: string, value: any[]) => {
+        if (!r.powerups.includes(code)) r.powerups.push(code);
+        r.props[code] = { ...(r.props[code] ?? {}), [slot]: value };
+      },
       isPowerupProperty: async () => false,
       isPowerupPropertyListItem: async () => false,
       isPowerupSlot: async () => false,
@@ -45,7 +56,7 @@ export function createFakeKb() {
         r.text = t;
       },
       setParent: async (p: any) => {
-        r.parent = typeof p === 'string' ? p : p._id;
+        r.parent = p === null || p === undefined ? null : typeof p === 'string' ? p : p._id;
       },
       getTagRems: async () => r.tags.map((t: string) => rems[t]),
       taggedRem: async () => Object.values(rems).filter((x: FakeRem) => x.tags.includes(id)),
@@ -65,8 +76,10 @@ export function createFakeKb() {
     rem: {
       findOne: async (id: string) => rems[id],
       createRem: async () => mk(`new${++captured.created}`, [], null),
-      findByName: async (name: any[]) =>
-        Object.values(rems).find((r: FakeRem) => r.text[0] === name[0] && r.parent === null),
+      findByName: async (name: any[], parentId: string | null = null) =>
+        Object.values(rems).find(
+          (r: FakeRem) => r.text[0] === name[0] && (r.parent ?? null) === (parentId ?? null)
+        ),
     },
     richText: {
       code: (text: string, language: string) => {
@@ -86,6 +99,8 @@ export const code = (text: string) => ({ i: 'm', text, code: true, language: 'la
 export const pin = (id: string) => ({ i: 'q', _id: id, pin: true });
 /** An inline rem reference (renders the target's name as words) to `id`. */
 export const ref = (id: string) => ({ i: 'q', _id: id });
+/** Remzot's powerup code, so a fake item doc can carry real-looking metadata slots. */
+export const ZOTERO_ITEM_POWERUP = 'zotero-item';
 /** Extra props that make a fake rem an unfinished todo. */
 export const todo = { isTodo: async () => true, getTodoStatus: async () => 'Unfinished' };
 /** Extra props that make a fake rem an H1 heading. */

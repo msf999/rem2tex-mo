@@ -19,6 +19,13 @@ export type Rem2TexConversionContext = {
   log?: Rem2TexLog;
   /** Rems tagged `Rem2Tex-ignore` (see `loadIgnoredRemIds`); undefined = no tag rem exists. */
   ignoredRemIds?: Set<string>;
+  /**
+   * Citekey -> the `Zotero/Items` doc the citation came from, filled by the flattener as it emits
+   * `\cite{key}`. Set only by the numbered-selection export, which needs the doc to read Remzot's
+   * metadata slots for the bibliography. A lookup map, NOT the numbering: numbers are assigned
+   * later, from the assembled document (see `renumberCitations`).
+   */
+  citationItemDocs?: Map<string, Rem>;
 };
 
 /** Best-effort `\title`, `\author`, `\documentclass{…}` from raw preamble text (for the log). */
@@ -347,7 +354,10 @@ function isParagraphExportRootRem(rem: Rem): boolean {
  */
 function isRem2TexOutputRem(rem: Rem): boolean {
   const t = flattenRawTitleText(rem.text).trim();
-  return t === 'Rem2Tex' || /^Rem2Tex( paragraph)? \d\d:\d\d [AP]M \d\d-\d\d-\d{4}$/.test(t);
+  return (
+    t === 'Rem2Tex' ||
+    /^Rem2Tex( paragraph| selection)? \d\d:\d\d [AP]M \d\d-\d\d-\d{4}$/.test(t)
+  );
 }
 
 async function collectParagraphExportSkipRemIds(paragraphRem: Rem): Promise<Set<string>> {
@@ -643,6 +653,8 @@ type FlattenOptions = {
   todoContentResolvePinsAsText?: boolean;
   /** Counts citations / dropped pins for the conversion log. */
   log?: Rem2TexLog;
+  /** Citekey -> `Zotero/Items` doc, recorded as citations are emitted (see the context field). */
+  citationItemDocs?: Map<string, Rem>;
 };
 
 const DIAGNOSTIC_PREVIEW_MAX = 1400;
@@ -820,6 +832,13 @@ const CITATION_WRAPPER_COMMANDS = new Set([
   'Parencite',
   'Textcite',
   'Autocite',
+  // Print a name / year / title rather than a label. Recognised here so a pin typed inside one is
+  // unwrapped like any other, and so the numbered export registers the work they name; what they
+  // PRINT is protected by NON_NUMERIC_CITE_COMMANDS.
+  'citedate',
+  'citetitle',
+  'Citeauthor',
+  'Citeyear',
 ]);
 
 /**
@@ -1057,6 +1076,11 @@ async function flattenRichTextElement(
       if (zoteroItemDoc) {
         const citation = await zoteroCitationForItem(plugin, zoteroItemDoc, options, nextSeen, depth);
         options.log?.citation(citation);
+        if (options.citationItemDocs) {
+          for (const key of citationKeysIn(citation)) {
+            if (!options.citationItemDocs.has(key)) options.citationItemDocs.set(key, zoteroItemDoc);
+          }
+        }
         return citation;
       }
     }
@@ -1416,6 +1440,7 @@ async function todoComment(
     hierarchyRemIds: context.hierarchyRemIds,
     todoContentResolvePinsAsText: true,
     log: context.log,
+    citationItemDocs: context.citationItemDocs,
   });
   const cleaned = stripTodoCommentArtifactCitations(text);
   if (!cleaned) return `% TODO ${marker}`;
@@ -1592,6 +1617,7 @@ async function commentRemLines(
       hierarchyRemIds: context.hierarchyRemIds,
       todoContentResolvePinsAsText: true,
       log: context.log,
+      citationItemDocs: context.citationItemDocs,
     })
   ).replace(/\\cite\{Status\}/gi, '');
   const lines = text
@@ -1670,6 +1696,7 @@ async function getRemBodyText(
   const plainText = await richTextToString(plugin, rem.text, {
     hierarchyRemIds: context.hierarchyRemIds,
     log: context.log,
+    citationItemDocs: context.citationItemDocs,
   });
 
   // Only treat content as raw code when the code-only extraction matches
@@ -2180,6 +2207,954 @@ async function serializeNode(
   // Close the paragraph so the next sibling starts on its own.
   if (emittedAny && output.length > 0 && output[output.length - 1] !== '') {
     output.push('');
+  }
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Numbered selection export — `[1]`-style citations plus a biblatex-shaped bibliography.
+ *
+ * Citations stay `\cite{key}` for the whole of serialization. That is deliberate: it is what keeps
+ * the Bug 1 unwrap (`\cite{` + pin + `}` typed by the author), the adjacent-citation merge and the
+ * Log's key list working, all of which key off the `\cite{}` spelling. Numbers are assigned
+ * afterwards, once, over the ASSEMBLED document (`renumberCitations`), so the same key gets the
+ * same number however it was written — pin, inline reference or typed by hand.
+ *
+ * The bibliography is then rendered from the `zotero-item` powerup slots Remzot writes onto the
+ * item doc (the flattener records which doc each key came from). Powerup codes are global, so
+ * reading another plugin's powerup needs no registration here — only the slot CODES, since the SDK
+ * forwards a plugin powerup's slot argument verbatim (`year` is the slot behind the "Date" label).
+ * ---------------------------------------------------------------------------------------------- */
+
+/** Every key inside every citation command in `text` (`\cite{a, b}` → `['a', 'b']`). */
+function citationKeysIn(text: string): string[] {
+  const keys: string[] = [];
+  const pattern = /\\[A-Za-z]+\*?(?:\[[^\]]*\])*\{([^{}]*)\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const name = match[0].slice(1).match(/^[A-Za-z]+/)?.[0] ?? '';
+    if (!CITATION_WRAPPER_COMMANDS.has(name)) continue;
+    for (const key of match[1].split(',')) {
+      const trimmed = key.trim();
+      if (trimmed) keys.push(trimmed);
+    }
+  }
+  return keys;
+}
+
+const ZOTERO_ITEM_POWERUP = 'zotero-item';
+
+/**
+ * Remzot's slot CODES — not its display names. The SDK translates slot names to codes only for
+ * BUILT-IN powerups; for a plugin powerup the second argument is sent to the host verbatim, so
+ * `getPowerupProperty('zotero-item', 'Date')` reads nothing while `'year'` works.
+ */
+const ZOTERO_SLOTS = {
+  title: 'title',
+  authors: 'authors',
+  publication: 'publication',
+  doi: 'doi',
+  link: 'link',
+  /** Display name is "Date"; the code stayed `year` for continuity with already-synced docs. */
+  date: 'year',
+} as const;
+
+/** The same fields keyed by the property rem's DISPLAY name, for the child-walk fallback. */
+const ZOTERO_SLOT_LABELS: Record<keyof typeof ZOTERO_SLOTS, string> = {
+  title: 'title',
+  authors: 'authors',
+  publication: 'publication',
+  doi: 'doi',
+  link: 'link',
+  date: 'date',
+};
+
+export type Rem2TexBibliographyEntry = {
+  /** The citekey as it appears in `\cite{…}` — the item doc's title. */
+  citekey: string;
+  title: string;
+  authors: string[];
+  publication: string;
+  /** Year first, then month and day when Zotero knew them: `['2008', '07', '31']`. */
+  dateParts: string[];
+  doi: string;
+  /** The item's URL, used in place of the DOI when it has none. */
+  link: string;
+  /** False when no item doc was found under `Zotero/Items` for this key at all. */
+  itemDocFound: boolean;
+};
+
+function hasRichTextContent(value: unknown): boolean {
+  if (typeof value === 'string') return value.trim().length > 0;
+  return Array.isArray(value) && value.length > 0;
+}
+
+/** Ids of every `i: 'q'` reference element in a rich text value, in order. */
+function collectReferenceIds(element: unknown, depth = 0, out: string[] = []): string[] {
+  if (depth > 8 || element === null || element === undefined) return out;
+  if (Array.isArray(element)) {
+    for (const child of element) collectReferenceIds(child, depth + 1, out);
+    return out;
+  }
+  if (typeof element !== 'object') return out;
+  const entry = element as Record<string, unknown>;
+  if (entry.i === 'q' && typeof entry._id === 'string') out.push(entry._id);
+  return out;
+}
+
+/** A referenced rem's own name, preferring its raw text (Remzot's lookup rems are plain rems). */
+async function referencedRemName(plugin: ReactRNPlugin, remId: string): Promise<string> {
+  try {
+    const target = await plugin.rem.findOne(remId);
+    if (!target) return '';
+    return flattenRawTitleText(target.text).trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * A slot value as one string: bare strings verbatim, references replaced by the name of the rem
+ * they point at (Remzot stores Type / Publication / Date / Authors as references into its lookup
+ * docs, and the DOI as a link rem whose display text is the bare DOI).
+ */
+async function flattenZoteroSlotValue(
+  plugin: ReactRNPlugin,
+  element: unknown,
+  depth = 0
+): Promise<string> {
+  if (depth > 8 || element === null || element === undefined) return '';
+  if (typeof element === 'string') return element;
+  if (Array.isArray(element)) {
+    let out = '';
+    for (const child of element) out += await flattenZoteroSlotValue(plugin, child, depth + 1);
+    return out;
+  }
+  if (typeof element !== 'object') return '';
+  const entry = element as Record<string, unknown>;
+  if (entry.i === 'q' && typeof entry._id === 'string') {
+    return referencedRemName(plugin, entry._id);
+  }
+  if (typeof entry.text === 'string' && (entry.i === 'm' || entry.i === undefined)) {
+    return entry.text;
+  }
+  return '';
+}
+
+/**
+ * Authors, one per reference. Flattening the slot to a string would be ambiguous: Remzot separates
+ * the references with a single SPACE and each author rem is named `Last, First`, so three authors
+ * read back as `Ke, Xu Smith, Jane Doe, John`. The role suffixes Remzot appends for non-author
+ * creators (` (editor)`) are dropped — a numeric bibliography lists the names.
+ */
+async function splitZoteroAuthors(plugin: ReactRNPlugin, element: unknown): Promise<string[]> {
+  const ids = collectReferenceIds(element);
+  if (ids.length > 0) {
+    const names: string[] = [];
+    for (const id of ids) {
+      const name = await referencedRemName(plugin, id);
+      if (name) names.push(name);
+    }
+    if (names.length > 0) return names;
+  }
+  // Hand-typed authors (no references): best effort on a plain string.
+  const plain = (await flattenZoteroSlotValue(plugin, element)).trim();
+  if (!plain) return [];
+  return plain
+    .split(/\s*;\s*|\s+and\s+/i)
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+}
+
+/** Remzot's lookup docs under the `Zotero` root, mapped to the slot they are referenced from. */
+const ZOTERO_LOOKUP_DOC_SLOTS: Record<string, keyof typeof ZOTERO_SLOTS> = {
+  Authors: 'authors',
+  Publications: 'publication',
+  Dates: 'date',
+};
+
+/**
+ * Which lookup doc under `Zotero` a referenced rem lives in (`Zotero/Authors/Doe, Jane` -> `Authors`,
+ * and `Zotero/Dates/2022/07` -> `Dates`, since the date tree is nested). '' when it is somewhere else.
+ */
+async function zoteroLookupDocNameFor(plugin: ReactRNPlugin, remId: string): Promise<string> {
+  try {
+    let candidate = await plugin.rem.findOne(remId);
+    if (!candidate) return '';
+    let parent: Rem | undefined = candidate.parent ? await plugin.rem.findOne(candidate.parent) : undefined;
+    let hops = 0;
+    while (parent && hops < ZOTERO_ANCESTOR_WALK_MAX) {
+      if (rawTitleEquals(parent, ZOTERO_ROOT_TITLE)) return flattenRawTitleText(candidate.text).trim();
+      candidate = parent;
+      parent = parent.parent ? await plugin.rem.findOne(parent.parent) : undefined;
+      hops += 1;
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+/** A bare DOI, as Remzot stores it in the DOI link rem's display text. */
+const DOI_PATTERN = /^10\.\d{4,9}\//;
+/** The built-in Link powerup (`b`) and the slot holding a link rem's real address. */
+const LINK_POWERUP = 'b';
+const LINK_URL_SLOT = 'URL';
+
+/** True when this rem is a RemNote link rem, i.e. it actually carries an address. */
+async function linkRemUrl(plugin: ReactRNPlugin, remId: string): Promise<string> {
+  try {
+    const linkRem = await plugin.rem.findOne(remId);
+    if (!linkRem) return '';
+    return (await linkRem.getPowerupProperty(LINK_POWERUP, LINK_URL_SLOT))?.trim() ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The URL behind Remzot's Link slot. Its value is a reference to a RemNote *link rem*, whose visible
+ * text is a PRETTIFIED address (scheme dropped, `-` shown as a space) that is not a usable URL — so
+ * the real one is read from the link rem's built-in `b`/`URL` slot, falling back to that text.
+ */
+async function resolveZoteroLinkUrl(plugin: ReactRNPlugin, element: unknown): Promise<string> {
+  for (const id of collectReferenceIds(element)) {
+    const url = await linkRemUrl(plugin, id);
+    if (url) return url;
+    const text = (await referencedRemName(plugin, id)).trim();
+    if (text) return text;
+  }
+  // Remzot writes the bare URL when the link rem could not be created.
+  return (await flattenZoteroSlotValue(plugin, element)).trim();
+}
+
+/**
+ * Fallback read path, for when the powerup route reads nothing — which is the norm whenever Remzot
+ * is not installed in this knowledge base: the slot VALUES are still on the item doc, but the host
+ * cannot resolve the slot definitions, so `getPowerupProperty…` throws.
+ *
+ * A powerup property's value lives in the property rem's `backText`. Naming the slot is the hard
+ * part: on the builds seen here the property rem's own `text` is EMPTY and `getTagRems()` returns
+ * nothing, so neither the documented text-reference nor IE's tag-matching identifies it. What does
+ * survive is where the value POINTS: Remzot references its deduped lookup docs, so a value whose
+ * first reference sits under `Zotero/Authors` is the Authors slot, `Zotero/Publications` is
+ * Publication, `Zotero/Dates` is Date. The remaining two are identified by shape — a value with no
+ * references at all is the Title, and a reference whose text is a bare DOI is the DOI.
+ */
+async function readZoteroSlotsByChildWalk(
+  plugin: ReactRNPlugin,
+  itemDoc: Rem
+): Promise<Map<string, unknown>> {
+  const found = new Map<string, unknown>();
+  let children: Rem[] = [];
+  try {
+    children = await itemDoc.getChildrenRem();
+  } catch {
+    return found;
+  }
+
+  for (const child of children) {
+    const value = child.backText;
+    if (!hasRichTextContent(value)) continue;
+    if (!(await isBookkeepingRem(child))) continue;
+
+    // 1. The documented layout: the property rem's own text references its slot definition.
+    let field: keyof typeof ZOTERO_SLOTS | '' = '';
+    for (const id of collectReferenceIds(child.text)) {
+      const label = (await referencedRemName(plugin, id)).toLowerCase().replace(/\(s\)$/, '').trim();
+      const matched = (Object.keys(ZOTERO_SLOT_LABELS) as Array<keyof typeof ZOTERO_SLOTS>).find(
+        (key) => ZOTERO_SLOT_LABELS[key] === label
+      );
+      if (matched) {
+        field = matched;
+        break;
+      }
+    }
+
+    // 2. Otherwise classify by what the value points at.
+    if (!field) {
+      const refs = collectReferenceIds(value);
+      if (refs.length === 0) {
+        // Plain text: the Title, unless it is a DOI or URL written without a link rem.
+        const plain = (await flattenZoteroSlotValue(plugin, value)).trim();
+        field = DOI_PATTERN.test(plain) ? 'doi' : /^https?:\/\//i.test(plain) ? 'link' : 'title';
+      } else {
+        const lookupDoc = await zoteroLookupDocNameFor(plugin, refs[0]);
+        if (lookupDoc) {
+          // Under a `Zotero/*` lookup doc. Only three of them are fields this bibliography prints;
+          // Types / Collections / Statuses resolve to '' and the property is skipped. Falling
+          // through to the link test here would file `Zotero/Types/Book` as the item's URL.
+          field = ZOTERO_LOOKUP_DOC_SLOTS[lookupDoc] ?? '';
+        } else {
+          // Not under a lookup doc, so a link rem: DOI or Link(s). Remzot overrides the DOI rem's
+          // text to the BARE DOI, which is what tells the two apart; a link is only a link when it
+          // really carries an address.
+          const refText = (await referencedRemName(plugin, refs[0])).trim();
+          if (DOI_PATTERN.test(refText)) field = 'doi';
+          else if (await linkRemUrl(plugin, refs[0])) field = 'link';
+        }
+      }
+    }
+
+    if (field && !found.has(ZOTERO_SLOT_LABELS[field])) {
+      found.set(ZOTERO_SLOT_LABELS[field], value);
+    }
+  }
+  return found;
+}
+
+/** Read Remzot's bibliographic slots off an item doc. Never throws — a bad read reads as empty. */
+async function readZoteroItemMetadata(
+  plugin: ReactRNPlugin,
+  citekey: string,
+  itemDoc: Rem | undefined
+): Promise<Rem2TexBibliographyEntry> {
+  const empty: Rem2TexBibliographyEntry = {
+    citekey,
+    title: '',
+    authors: [],
+    publication: '',
+    dateParts: [],
+    doi: '',
+    link: '',
+    itemDocFound: Boolean(itemDoc),
+  };
+  if (!itemDoc) return empty;
+
+  let walked: Map<string, unknown> | undefined;
+  const readSlot = async (field: keyof typeof ZOTERO_SLOTS): Promise<unknown> => {
+    try {
+      const direct = await itemDoc.getPowerupPropertyAsRichText(ZOTERO_ITEM_POWERUP, ZOTERO_SLOTS[field]);
+      if (hasRichTextContent(direct)) return direct;
+    } catch {
+      /* the powerup may be absent, hidden or unreadable on this build — fall through */
+    }
+    if (!walked) walked = await readZoteroSlotsByChildWalk(plugin, itemDoc);
+    return walked.get(ZOTERO_SLOT_LABELS[field]);
+  };
+
+  const [titleRich, authorsRich, publicationRich, doiRich, linkRich, dateRich] = [
+    await readSlot('title'),
+    await readSlot('authors'),
+    await readSlot('publication'),
+    await readSlot('doi'),
+    await readSlot('link'),
+    await readSlot('date'),
+  ];
+
+  // The Date slot is a nested reference PATH (‹2008›-‹07›-‹31›), so the parts come from the refs.
+  let dateParts = (await Promise.all(collectReferenceIds(dateRich).map((id) => referencedRemName(plugin, id))))
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (dateParts.length === 0) {
+    // Docs synced before the Date rework hold plain text here.
+    dateParts = (await flattenZoteroSlotValue(plugin, dateRich))
+      .split(/[^0-9A-Za-z]+/)
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+  }
+
+  return {
+    citekey,
+    title: (await flattenZoteroSlotValue(plugin, titleRich)).trim(),
+    authors: await splitZoteroAuthors(plugin, authorsRich),
+    publication: (await flattenZoteroSlotValue(plugin, publicationRich)).trim(),
+    dateParts,
+    doi: (await flattenZoteroSlotValue(plugin, doiRich)).trim(),
+    link: await resolveZoteroLinkUrl(plugin, linkRich),
+    itemDocFound: true,
+  };
+}
+
+/** True when nothing citable was read — the case mo asked to be called out in the bibliography. */
+function isEmptyBibliographyEntry(entry: Rem2TexBibliographyEntry): boolean {
+  return (
+    entry.title.length === 0 &&
+    entry.authors.length === 0 &&
+    entry.publication.length === 0 &&
+    entry.doi.length === 0 &&
+    entry.link.length === 0 &&
+    entry.dateParts.length === 0
+  );
+}
+
+/** Remzot stores `Last, First`; biblatex's numeric style prints given-family. Institutions pass. */
+function toGivenFamilyName(name: string): string {
+  const comma = name.indexOf(',');
+  if (comma === -1) return name.trim();
+  const family = name.slice(0, comma).trim();
+  const given = name.slice(comma + 1).trim();
+  if (!family || !given) return name.replace(',', ' ').replace(/\s+/g, ' ').trim();
+  return `${given} ${family}`;
+}
+
+/**
+ * biblatex defaults: `maxbibnames = 3`, `minbibnames = 1`. More than three names truncate to the
+ * first and `et al.`; otherwise every name prints, with the serial comma before `and` from three up.
+ */
+function formatAuthorList(names: string[]): string {
+  const printed = names.map(toGivenFamilyName).filter((name) => name.length > 0);
+  if (printed.length === 0) return '';
+  if (printed.length > 3) return `${printed[0]} et al.`;
+  if (printed.length === 1) return printed[0];
+  if (printed.length === 2) return `${printed[0]} and ${printed[1]}`;
+  return `${printed.slice(0, -1).join(', ')}, and ${printed[printed.length - 1]}`;
+}
+
+/** English short month names (`dateabbrev=true`, the biblatex default). Note `Sept.`, not `Sep.`. */
+const BIBLATEX_SHORT_MONTHS = [
+  'Jan.',
+  'Feb.',
+  'Mar.',
+  'Apr.',
+  'May',
+  'June',
+  'July',
+  'Aug.',
+  'Sept.',
+  'Oct.',
+  'Nov.',
+  'Dec.',
+];
+
+/** `['2008','07','31']` → `31 July 2008`; `['2008','07']` → `July 2008`; `['2008']` → `2008`. */
+function formatBiblatexDate(dateParts: string[]): string {
+  const [year, month, day] = dateParts;
+  if (!year || !/^\d{3,4}$/.test(year)) return dateParts.join(' ').trim();
+  const monthIndex = month ? Number(month) - 1 : -1;
+  const monthName =
+    monthIndex >= 0 && monthIndex < 12 ? BIBLATEX_SHORT_MONTHS[monthIndex] : month && !/^\d+$/.test(month) ? month : '';
+  if (!monthName) return year;
+  const dayNumber = day && /^\d{1,2}$/.test(day) ? String(Number(day)) : '';
+  return dayNumber ? `${dayNumber} ${monthName} ${year}` : `${monthName} ${year}`;
+}
+
+/**
+ * biblatex buffers separators instead of concatenating them: an absent field leaves the buffer
+ * untouched, a later `\setunit` overwrites a pending one, and `\addperiod` is a no-op after
+ * punctuation. Reproducing that is the difference between `), p. 1` and `). . p. 1`.
+ */
+class BiblatexEntryBuilder {
+  private out = '';
+  private pending = '';
+  /** biblatex's `\ifpunct`: whether what was last printed ENDS a sentence. Tracked rather than
+   *  re-read off `out`, because a quoted title ends in `''` while its punctuation sits inside. */
+  private endsSentence = false;
+
+  emit(text: string, endsSentence?: boolean): void {
+    if (!text) return;
+    this.out += this.flush();
+    this.out += text;
+    this.pending = '';
+    this.endsSentence = endsSentence ?? /[.!?,;:]$/.test(text);
+  }
+
+  private flush(): string {
+    // Nothing printed yet: biblatex's buffer only ever separates, so an entry never OPENS with one.
+    if (!this.out) return '';
+    if (this.pending.startsWith('.') && this.endsSentence) return this.pending.slice(1);
+    return this.pending;
+  }
+
+  newunit(): void {
+    this.pending = '. ';
+  }
+
+  setunit(separator: string): void {
+    this.pending = separator;
+  }
+
+  finish(): string {
+    this.pending = '.';
+    return (this.out + this.flush()).trimEnd();
+  }
+}
+
+const BIBLIOGRAPHY_HEADING = '% ---------------- Bibliography ----------------';
+
+/**
+ * One `[n] …` entry in biblatex's `numeric` shape, reduced to the fields Remzot stores (it keeps no
+ * volume, issue, pages or ISSN, so those parts of a full biblatex entry can never appear here).
+ */
+function formatBibliographyEntry(number: number, entry: Rem2TexBibliographyEntry): string {
+  if (isEmptyBibliographyEntry(entry)) {
+    // Both halves are escaped: this note is visible document text, not a comment, so a citekey
+    // with an underscore (`smith_2020`) must not reach LaTeX bare.
+    const key = escapeLatex(entry.citekey);
+    const why = entry.itemDocFound
+      ? 'its Zotero properties are empty; sync the item in Remzot to fill them in'
+      : `no item titled "${key}" was found under Zotero/Items`;
+    return `[${number}] ${key}. [Rem2Tex: no metadata — ${why}.]`;
+  }
+
+  const builder = new BiblatexEntryBuilder();
+  const authors = formatAuthorList(entry.authors);
+  if (authors) {
+    builder.emit(escapeLatex(authors));
+    builder.setunit('. ');
+  }
+  if (entry.title) {
+    // `\isdot`: a title that already ends in sentence punctuation never takes another period —
+    // whatever field comes next, or the closing period of the entry.
+    builder.emit(`"${escapeLatex(entry.title)}"`, /[.!?]$/.test(entry.title.trim()));
+    builder.newunit();
+  }
+  if (entry.publication) {
+    builder.emit('In:');
+    builder.setunit(' ');
+    builder.emit(escapeLatex(entry.publication));
+  }
+  const date = formatBiblatexDate(entry.dateParts);
+  if (date) {
+    builder.setunit(' ');
+    builder.emit(`(${escapeLatex(date)})`);
+  }
+  // An item with no DOI falls back to its URL, which is the only locator it has (mo, 2026-09-17).
+  // Neither goes through `escapeLatex`, which would read a `\` or `$` in an address as LaTeX; the
+  // plain escaper keeps the literal intact while still making `_`, `%` and `&` compile.
+  if (entry.doi) {
+    builder.newunit();
+    builder.emit(`doi: ${escapePlainTextSegment(entry.doi)}`);
+  } else if (entry.link) {
+    builder.newunit();
+    builder.emit(`url: ${escapePlainTextSegment(entry.link)}`);
+  }
+  return `[${number}] ${builder.finish()}`;
+}
+
+/**
+ * The whole block appended under the body: a comment heading, then one blank-line-separated entry.
+ * Entries are PLAIN text, not LaTeX markup (mo, 2026-09-17): straight quotes, an unstyled journal
+ * name and a lowercase `doi:` / `url:`, so the block reads as written rather than as source.
+ */
+function formatBibliography(entries: Rem2TexBibliographyEntry[]): string {
+  if (entries.length === 0) return '';
+  const lines = [BIBLIOGRAPHY_HEADING, ''];
+  entries.forEach((entry, index) => {
+    lines.push(formatBibliographyEntry(index + 1, entry));
+    if (index < entries.length - 1) lines.push('');
+  });
+  return lines.join('\n');
+}
+
+/** Index of the first `%` that really opens a LaTeX comment (a `\%` written by the escaper is not). */
+function firstCommentIndex(line: string): number {
+  for (let i = 0; i < line.length; i += 1) {
+    if (line[i] === '%' && !isEscaped(line, i)) return i;
+  }
+  return -1;
+}
+
+/**
+ * Citation commands that print an AUTHOR, a YEAR or a TITLE rather than a label. Replacing these
+ * with `[n]` would delete the word the sentence is built around ("As \citeauthor{k} showed" →
+ * "As [1] showed"), so they are left exactly as typed. Their keys are still registered, so the work
+ * they name does get a bibliography entry.
+ */
+const NON_NUMERIC_CITE_COMMANDS = new Set([
+  'citeauthor',
+  'citeyear',
+  'citeyearpar',
+  'citedate',
+  'citetitle',
+  'Citeauthor',
+  'Citeyear',
+]);
+
+/** What a citation command becomes once its keys are numbers. */
+function renderCitationNumbers(command: string, numbers: number[], options: string[]): string {
+  // `\nocite` puts a work in the bibliography without printing anything.
+  if (command === 'nocite') return '';
+  const joined = numbers.join(', ');
+  // `\citenum` prints the bare number, without the brackets.
+  if (command === 'citenum') return joined;
+  // biblatex renders the notes inside the brackets: `\cite[see][p. 3]{k}` -> `[see 1, p. 3]`.
+  const prenote = options.length > 1 ? options[0].trim() : '';
+  const postnote = options.length > 0 ? options[options.length - 1].trim() : '';
+  let label = joined;
+  if (prenote) label = `${prenote} ${label}`;
+  if (postnote) label = `${label}, ${postnote}`;
+  // `\supercite` is the superscripted form of the numeric citation.
+  return command === 'supercite' ? `\\textsuperscript{[${label}]}` : `[${label}]`;
+}
+
+/**
+ * Rewrite every citation command in one stretch of LaTeX. `numberFor` returns undefined to decline
+ * a key, and a command with any declined key is left exactly as it was.
+ */
+function replaceCitationsInCode(
+  text: string,
+  numberFor: (key: string) => number | undefined
+): string {
+  if (!text.includes('\\')) return text;
+  let result = '';
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const slash = text.indexOf('\\', cursor);
+    if (slash === -1) break;
+
+    let nameEnd = slash + 1;
+    while (nameEnd < text.length && /[A-Za-z]/.test(text[nameEnd])) nameEnd += 1;
+    const name = text.slice(slash + 1, nameEnd);
+
+    if (!CITATION_WRAPPER_COMMANDS.has(name) || isEscaped(text, slash)) {
+      result += text.slice(cursor, slash + 1);
+      cursor = slash + 1;
+      continue;
+    }
+
+    let argStart = nameEnd;
+    if (text[argStart] === '*') argStart += 1;
+    const options: string[] = [];
+    while (text[argStart] === '[') {
+      const optionEnd = findMatchingGroup(text, argStart, '[', ']');
+      if (optionEnd === -1) break;
+      options.push(text.slice(argStart + 1, optionEnd - 1));
+      argStart = optionEnd;
+    }
+    if (text[argStart] !== '{') {
+      result += text.slice(cursor, argStart);
+      cursor = argStart;
+      continue;
+    }
+    const argEnd = findMatchingGroup(text, argStart, '{', '}');
+    if (argEnd === -1) {
+      result += text.slice(cursor, argStart + 1);
+      cursor = argStart + 1;
+      continue;
+    }
+
+    const cited = text
+      .slice(argStart + 1, argEnd - 1)
+      .split(',')
+      .map((key) => key.trim())
+      .filter((key) => key.length > 0);
+    if (cited.length === 0) {
+      // `\cite{}` — an author-typed wrapper whose pin never resolved. Leave it visible.
+      result += text.slice(cursor, argEnd);
+      cursor = argEnd;
+      continue;
+    }
+
+    const seen = new Set<string>();
+    const numbers: number[] = [];
+    let declined = false;
+    for (const key of cited) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const number = numberFor(key);
+      if (number === undefined) {
+        declined = true;
+        break;
+      }
+      numbers.push(number);
+    }
+    // A declined key (comment pass, key not cited in the body) or a command that prints words:
+    // re-emit exactly what the author typed.
+    if (declined || NON_NUMERIC_CITE_COMMANDS.has(name)) {
+      result += text.slice(cursor, argEnd);
+      cursor = argEnd;
+      continue;
+    }
+
+    result += text.slice(cursor, slash);
+    result += renderCitationNumbers(name, numbers, options);
+    cursor = argEnd;
+  }
+
+  result += text.slice(cursor);
+  return result;
+}
+
+/**
+ * Replace every `\cite{key}` in the assembled document with `[n]`, numbering keys in order of first
+ * appearance.
+ *
+ * A `%` comment never CREATES a number: commenting a paragraph out must not put a work in the
+ * bibliography, and a `% TODO` reminder to read something is not a citation. A comment does follow
+ * one, though — a key that the body cites anyway is shown as its number there too, so the comment
+ * reads like the rest of the document. Keys only ever cited in comments keep their `\cite{key}`.
+ */
+export function renumberCitations(latex: string): { latex: string; keys: string[] } {
+  const numbers = new Map<string, number>();
+  const keys: string[] = [];
+  const assignNumber = (key: string): number => {
+    const existing = numbers.get(key);
+    if (existing !== undefined) return existing;
+    numbers.set(key, keys.length + 1);
+    keys.push(key);
+    return keys.length;
+  };
+  const existingNumber = (key: string): number | undefined => numbers.get(key);
+
+  // Two passes: every body citation is numbered first, so the comment pass can tell a work the
+  // document really cites from one that only a comment mentions.
+  const split = latex.split('\n').map((line) => {
+    const commentAt = firstCommentIndex(line);
+    return commentAt === -1
+      ? { code: line, comment: '' }
+      : { code: line.slice(0, commentAt), comment: line.slice(commentAt) };
+  });
+
+  const code = split.map((line) => replaceCitationsInCode(line.code, assignNumber));
+  return {
+    latex: split.map((line, i) => code[i] + replaceCitationsInCode(line.comment, existingNumber)).join('\n'),
+    keys,
+  };
+}
+
+/**
+ * The `Items` doc to resolve hand-typed citekeys against. Preferred source is an item doc the
+ * flattener already resolved from a pin — its parent IS `Items`. Only when the selection contains no
+ * pinned citation at all do we go looking by name, and a knowledge base can hold more than one rem
+ * titled `Zotero` (`findByName` returns just one, which may be the empty one).
+ */
+async function findZoteroItemsDoc(
+  plugin: ReactRNPlugin,
+  knownItemDocs: Iterable<Rem>
+): Promise<Rem | undefined> {
+  for (const itemDoc of knownItemDocs) {
+    if (!itemDoc.parent) continue;
+    const parent = await plugin.rem.findOne(itemDoc.parent);
+    if (parent && rawTitleEquals(parent, ZOTERO_ITEMS_TITLE)) return parent;
+  }
+  try {
+    const zoteroRoot = await plugin.rem.findByName([ZOTERO_ROOT_TITLE], null);
+    if (!zoteroRoot) return undefined;
+    for (const child of await zoteroRoot.getChildrenRem()) {
+      if (rawTitleEquals(child, ZOTERO_ITEMS_TITLE)) return child;
+    }
+  } catch {
+    /* no Zotero tree reachable */
+  }
+  return undefined;
+}
+
+/** The item doc for a citekey nobody pinned — the author typed `\cite{key}` by hand. */
+async function lookupZoteroItemByCitekey(
+  plugin: ReactRNPlugin,
+  itemsDoc: Rem | undefined,
+  citekey: string
+): Promise<Rem | undefined> {
+  if (!itemsDoc) return undefined;
+  try {
+    return await plugin.rem.findByName([citekey], itemsDoc._id);
+  } catch {
+    return undefined;
+  }
+}
+
+/** One selected rem per exported subtree: no duplicates, no rem already inside another, in outline order. */
+async function normalizeSelectionRems(plugin: ReactRNPlugin, rems: Rem[]): Promise<Rem[]> {
+  const byId = new Map<string, Rem>();
+  for (const rem of rems) {
+    if (!byId.has(rem._id)) byId.set(rem._id, rem);
+  }
+  const unique = [...byId.values()];
+
+  // A rem inside another selected rem's subtree would otherwise be serialized twice.
+  const covered = new Set<string>();
+  for (const rem of unique) {
+    for (const descendant of await rem.getDescendants()) {
+      if (byId.has(descendant._id)) covered.add(descendant._id);
+    }
+  }
+  const roots = unique.filter((rem) => !covered.has(rem._id));
+  if (roots.length < 2) return roots;
+
+  // `remIds` comes back in SELECTION order; when the rems are siblings, outline order is what the
+  // author sees, so the exported document reads top to bottom.
+  const parentId = roots[0].parent ?? null;
+  if (parentId && roots.every((rem) => (rem.parent ?? null) === parentId)) {
+    const parent = await plugin.rem.findOne(parentId);
+    if (parent) {
+      const order = (await parent.getChildrenRem()).map((child) => child._id);
+      roots.sort((a, b) => order.indexOf(a._id) - order.indexOf(b._id));
+    }
+  }
+  return roots;
+}
+
+/**
+ * One rem → the export is its last child. Several rems → a sister, right after the last of them.
+ * The position is always passed explicitly: the SDK documents `setParent` as PREPENDING by default.
+ */
+async function createSelectionLatexExport(
+  plugin: ReactRNPlugin,
+  anchors: Rem[],
+  latex: string
+): Promise<string> {
+  const outputTitle = `Rem2Tex selection ${toOutputTimestamp()}`;
+  const outputRem = await plugin.rem.createRem();
+  if (!outputRem) {
+    throw new Error('Failed to create selection export rem.');
+  }
+  await outputRem.setText([outputTitle]);
+
+  if (anchors.length === 1) {
+    const children = await anchors[0].getChildrenRem();
+    await outputRem.setParent(anchors[0], children.length);
+  } else {
+    const last = anchors[anchors.length - 1];
+    const parentId = last.parent ?? null;
+    const parent = parentId ? await plugin.rem.findOne(parentId) : undefined;
+    if (parent) {
+      const order = (await parent.getChildrenRem()).map((child) => child._id);
+      const at = order.indexOf(last._id);
+      await outputRem.setParent(parent, at === -1 ? order.length : at + 1);
+    } else {
+      await outputRem.setParent(null);
+    }
+  }
+
+  const codeRem = await plugin.rem.createRem();
+  if (!codeRem) {
+    throw new Error('Failed to create selection export code rem.');
+  }
+  await codeRem.setParent(outputRem);
+  await codeRem.setText(await plugin.richText.code(latex, 'latex').value());
+  return outputTitle;
+}
+
+/**
+ * Rems for the numbered export: the ids handed in (the command resolves the editor selection, which
+ * the Omnibar can steal), else the focused rem, else the rem open in the focused pane.
+ */
+export async function resolveSelectionRems(
+  plugin: ReactRNPlugin,
+  remIds?: string[]
+): Promise<Rem[]> {
+  const ids = remIds?.filter((id) => typeof id === 'string' && id.length > 0) ?? [];
+  if (ids.length > 0) {
+    const rems: Rem[] = [];
+    for (const id of ids) {
+      const rem = await plugin.rem.findOne(id);
+      if (rem) rems.push(rem);
+    }
+    if (rems.length > 0) return rems;
+    throw new Rem2TexConversionError({
+      code: 'INACCESSIBLE_REM',
+      headline: 'The selected rems are not accessible to this plugin',
+      whatHappened: 'None of the selected rems could be read.',
+      hints: ['Check the plugin permissions in Settings → Plugins, then select the rems again.'],
+    });
+  }
+  return [await getFocusedParentRem(plugin)];
+}
+
+export type Rem2TexSelectionRunResult = {
+  outputTitle: string;
+  /** How many top-level rems were exported (after dropping rems nested inside other selected rems). */
+  remCount: number;
+  /** Distinct works cited, i.e. the length of the bibliography. */
+  citationCount: number;
+  /** Of those, how many had no usable Zotero metadata and say so in the bibliography. */
+  missingMetadataCount: number;
+  /** Titles of the rems actually exported, so the toast can name them (a stale selection shows up). */
+  exportedTitles: string[];
+};
+
+export type Rem2TexSelectionRunOptions = {
+  /** Ids from the editor selection; omitted, the focused rem is used. */
+  selectedRemIds?: string[];
+  todoExportMode?: Rem2TexTodoExportMode;
+};
+
+/**
+ * Convert the selected rem(s) and their descendants into one LaTeX code block whose citations are
+ * `[1]`-style numbers, followed by the matching numbered bibliography.
+ */
+export async function runSelectionToTexConversion(
+  plugin: ReactRNPlugin,
+  options?: Rem2TexSelectionRunOptions
+): Promise<Rem2TexSelectionRunResult> {
+  try {
+    const selected = await resolveSelectionRems(plugin, options?.selectedRemIds);
+    const anchors = await normalizeSelectionRems(plugin, selected);
+    if (anchors.length === 0) {
+      throw new Rem2TexConversionError({
+        code: 'NOTHING_TO_EXPORT',
+        headline: 'Nothing to export',
+        whatHappened: 'No rem was selected or focused.',
+        hints: ['Select one or more rems (or click into one), then run the command again.'],
+      });
+    }
+
+    const hierarchyRemIds = new Set<string>();
+    const skipRemSubtreeIds = new Set<string>();
+    for (const anchor of anchors) {
+      hierarchyRemIds.add(anchor._id);
+      for (const descendant of await anchor.getDescendants()) hierarchyRemIds.add(descendant._id);
+      for (const id of await collectParagraphExportSkipRemIds(anchor)) skipRemSubtreeIds.add(id);
+    }
+
+    const citationItemDocs = new Map<string, Rem>();
+    const context: Rem2TexConversionContext = {
+      hierarchyRemIds,
+      rootRemId: anchors[0]._id,
+      todoExportMode: options?.todoExportMode ?? 'all',
+      skipRemSubtreeIds,
+      ignoredRemIds: await loadIgnoredRemIds(plugin),
+      citationItemDocs,
+    };
+
+    const lines: string[] = [];
+    for (const anchor of anchors) {
+      if (lines.length > 0 && lines[lines.length - 1] !== '') lines.push('');
+      try {
+        await serializeNode(plugin, anchor, 0, lines, context, undefined, undefined);
+      } catch (error) {
+        throw await enrichConversionErrorWithSourceRem(plugin, error, anchor, context);
+      }
+    }
+
+    const body = lines.join('\n').trim();
+    if (!body) {
+      const title = flattenRawTitleText(anchors[0].text).trim() || '(untitled)';
+      throw new Rem2TexConversionError({
+        code: 'NOTHING_TO_EXPORT',
+        headline: 'Nothing to export',
+        whatHappened:
+          anchors.length === 1
+            ? `"${title}" and its descendants produced no LaTeX (empty rem, or everything under it is skipped).`
+            : 'The selected rems produced no LaTeX (empty rems, or everything under them is skipped).',
+        sourceRemId: anchors[0]._id,
+        sourceRemTitle: title,
+        hints: [
+          `Select rems with content; remove the ${REM2TEX_IGNORE_TAG} tag if you meant to export them.`,
+        ],
+      });
+    }
+
+    const { latex: numbered, keys } = renumberCitations(body);
+    const itemsDoc = await findZoteroItemsDoc(plugin, citationItemDocs.values());
+    const entries: Rem2TexBibliographyEntry[] = [];
+    for (const key of keys) {
+      const itemDoc =
+        citationItemDocs.get(key) ?? (await lookupZoteroItemByCitekey(plugin, itemsDoc, key));
+      entries.push(await readZoteroItemMetadata(plugin, key, itemDoc));
+    }
+
+    const bibliography = formatBibliography(entries);
+    const latex = bibliography ? `${numbered}\n\n${bibliography}` : numbered;
+    const outputTitle = await createSelectionLatexExport(plugin, anchors, latex);
+
+    return {
+      outputTitle,
+      remCount: anchors.length,
+      citationCount: entries.length,
+      missingMetadataCount: entries.filter(isEmptyBibliographyEntry).length,
+      exportedTitles: await Promise.all(
+        anchors.slice(0, 4).map(async (anchor) => {
+          const title = (await getRemTitle(plugin, anchor, context)).replace(/\s+/g, ' ').trim();
+          const label = title || '(untitled)';
+          return label.length > 40 ? `${label.slice(0, 39)}…` : label;
+        })
+      ),
+    };
+  } catch (error) {
+    if (isRem2TexConversionError(error)) throw error;
+    throw new Error(normalizeUnknownError(error));
   }
 }
 

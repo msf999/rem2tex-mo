@@ -12,12 +12,13 @@ Rem2Tex is a [Remnote](https://www.remnote.com) plugin for authors who draft pap
 Headings become `\section`s, prose is LaTeX-escaped, code blocks pass through untouched, pins to your
 Zotero library become `\cite{…}`, and todos become `% TODO` comments. One command turns the outline
 into a complete `.tex` document and writes it — with a readable conversion log — back into your
-knowledge base.
+knowledge base. Another takes just the rems you have selected and gives you `[1]`-style numbered
+citations with a matching bibliography, built from your Zotero item properties.
 
 > [!IMPORTANT]
-> **Exports only ever add.** A conversion creates a new `Rem2Tex <timestamp>` rem under your paper and
-> never edits or deletes anything else. The one command that modifies a rem is `/rem2tex-ignore`,
-> which toggles the `Rem2Tex-ignore` tag on the rem you run it on.
+> **Exports only ever add.** A conversion creates a new `Rem2Tex <timestamp>` (or
+> `Rem2Tex selection <timestamp>`) rem and never edits or deletes anything else. The one command that
+> modifies a rem is `/rem2tex-ignore`, which toggles the `Rem2Tex-ignore` tag on the rem you run it on.
 
 > [!WARNING]
 > **Vibe-coded — experimental.** Built largely by prompting an AI assistant, with light human review.
@@ -65,13 +66,14 @@ its parent.
 
 ## Commands
 
-All five are prefixed **`Rem2Tex:`** in the omnibar.
+All six are prefixed **`Rem2Tex:`** in the omnibar.
 
 | Command | Quick code | What it does |
 | --- | --- | --- |
 | **Convert Paper to TeX (Copy All Todos as Comments)** | `rem2tex` | Export the paper; every todo becomes a `% TODO` comment. |
 | **Convert Paper to TeX (Copy Unfinished Todos as Comments)** | `rem2tex-unfinished` | The same, but finished todos vanish with their subtrees. |
 | **Convert Paper to TeX (Do Not Copy Todos as Comments)** | `rem2tex-no-todos` | The same, with no todo comments at all. |
+| **Selection to TeX (Numbered Citations + Bibliography)** | `rem2tex-selection` | Convert the selected rem(s) into one code block whose citations are `[1]`, `[2]` … followed by a numbered bibliography. See [Numbered citations](#numbered-citations-and-the-bibliography). |
 | **Paragraph to TeX** | `rem2tex-paragraph` | Convert just the focused rem and its descendants into a `Rem2Tex paragraph <timestamp>` child. No log; if it yields nothing, the toast says so. |
 | **Toggle Rem2Tex-ignore tag on this rem** | `rem2tex-ignore` | Add or remove the `Rem2Tex-ignore` tag, creating the tag rem the first time. |
 
@@ -99,6 +101,71 @@ items you added there by hand count too, and a pin to a note nested inside an it
 > Cite by pinning the item, inside a typed `\cite{…}` if you like: typed commands are never doubled
 > and adjacent citations merge into `\cite{a, b}`. Rem2Tex never generates `\ref{}` — type
 > `\ref{fig:setup}` yourself, and a pin inside `\ref{…}` is dropped like any other pin.
+
+---
+
+## Numbered citations and the bibliography
+
+`Rem2Tex: Selection to TeX` is for the times you want a self-contained excerpt — a section to send a
+co-author, a paragraph for a grant form — rather than the whole paper. **Select the rems** you want
+(click a bullet, `Esc`, `Shift+↓` for more), then run the command from the omnibar.
+
+It converts the selection with the ordinary body rules — headings, escaping, code blocks, todos as
+`% TODO` comments, the `Rem2Tex-ignore` tag — and then does two extra things:
+
+1. **Every citation becomes a number.** `\cite{smith2020}` becomes `[1]`, the next new work `[2]`, and
+   so on **in order of first appearance**; citing the same work again reuses its number. Typed
+   wrappers keep their meaning: `\supercite{…}` becomes `\textsuperscript{[1]}`, `\cite[p. 3]{…}`
+   becomes `[1, p. 3]`, `\citenum{…}` becomes a bare `1`, and `\nocite{…}` prints nothing but still
+   earns a bibliography entry. `\citeauthor{…}` and `\citeyear{…}` print a name or a year rather than
+   a label, so they are left exactly as you typed them — their work still gets an entry.
+2. **A numbered bibliography is appended**, formatted like `biblatex`'s `numeric` style.
+
+```
+\section{Results}
+
+The defect levels align with earlier work [1, 2], and the correction scheme [3] is unchanged.
+
+% ---------------- Bibliography ----------------
+
+[1] Audrius Alkauskas, Peter Broqvist, and Alfredo Pasquarello. "Defect Energy Levels in Density
+Functional Calculations". In: Physical Review Letters (July 2008). doi: 10.1103/PhysRevLett.101.046405.
+
+[2] R M Martin. "Electronic structure: Basic theory and practical methods". In: Cambridge University
+Press (2020). url: https://books.google.com.au/books?id=dmRTFLpSGNsC.
+```
+
+Where the export lands depends on what you selected: **one rem** → the export is a child of that rem;
+**several rems** → it is a sister, inserted right after the last of them. Either way it is a
+`Rem2Tex selection <timestamp>` rem with a single `latex` code block. There is no log — the toast says
+how many works were cited, and anything missing is written into the bibliography itself.
+
+### Where the bibliography comes from
+
+Each entry is read from the properties [Remzot](https://github.com/msf999/remzot) writes onto the item
+doc — Title, Authors, Publication, Date, DOI and Link(s). Authors are stored as `Last, First` and
+printed as `First Last`; more than three of them truncate to `First author et al.`, exactly as
+biblatex does. An item with **no DOI falls back to its link**, printed as `url: …` — and it is the
+real address, not the shortened text Remnote shows on a link.
+
+> [!NOTE]
+> Remzot does not store **volume, issue, pages or ISSN**, so those parts of a full biblatex entry can
+> never appear. Entries are otherwise complete; fields the item simply does not have are left out
+> silently. Entries are plain text — straight quotes, an unstyled journal name, a lowercase `doi:` —
+> so the block reads as written rather than as LaTeX source.
+
+A citekey with nothing behind it still gets a number, and says why in its entry:
+
+```
+[7] smith2019. [Rem2Tex: no metadata — no item titled "smith2019" was found under Zotero/Items.]
+```
+
+You will see that when you typed `\cite{key}` by hand for an item you have not added yet, or when the
+item doc exists but has never been synced (then it reads *its Zotero properties are empty*).
+
+> [!TIP]
+> Citations inside `%` comments never create bibliography entries — a `% TODO read \cite{…}` reminder
+> is not a citation. If the body cites that work anyway, the comment shows its number too.
 
 ---
 

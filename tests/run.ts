@@ -9,10 +9,11 @@ import * as comments from './comments.test';
 import * as layout from './layout.test';
 import * as regressions from './regressions.test';
 import * as ignore from './ignore.test';
+import * as bibliography from './bibliography.test';
 
 (async () => {
   let failures = 0;
-  for (const s of [pins, comments, layout, regressions, ignore]) {
+  for (const s of [pins, comments, layout, regressions, ignore, bibliography]) {
     failures += await s.run();
   }
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);
