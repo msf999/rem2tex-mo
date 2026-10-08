@@ -1,4 +1,4 @@
-import { AppEvents, declareIndexPlugin, type ReactRNPlugin, SelectionType } from '@remnote/plugin-sdk';
+import { AppEvents, declareIndexPlugin, type ReactRNPlugin, SelectionType, WidgetLocation } from '@remnote/plugin-sdk';
 import '../style.css';
 import '../index.css'; // import <widget-name>.css
 import {
@@ -6,10 +6,12 @@ import {
   isRem2TexConversionError,
   normalizeUnknownError,
   REM2TEX_IGNORE_TAG,
-  type Rem2TexTodoExportMode,
-  runParagraphToTexConversion,
-  runRem2TexConversion,
-  runSelectionToTexConversion,
+  previewRem2TexConvert,
+  REM2TEX_CONVERT_REQUEST_KEY,
+  REM2TEX_CONVERT_WIDGET,
+  type Rem2TexConvertKind,
+  type Rem2TexConvertRequest,
+  runRem2TexConvert,
   toggleIgnoreTag,
 } from '../lib/rem2tex';
 
@@ -84,61 +86,79 @@ function failureMessage(error: unknown): string {
 async function onActivate(plugin: ReactRNPlugin) {
   registerSelectionTracker(plugin);
 
+  // Same size as Remzot's sync popup, which fits without clamping.
+  await plugin.app.registerWidget(REM2TEX_CONVERT_WIDGET, WidgetLocation.Popup, {
+    dimensions: { height: 800, width: 1000 },
+  });
+
   /**
-   * Paper export: no popup. The export rem (`Rem2Tex/Rem2Tex <timestamp>`) holds a Paper code block
-   * and a Log code block; the toast only says whether to go and read the log.
+   * Every conversion goes through one place: preview first, then decide.
+   *  - Paper ALWAYS opens the popup, because that is where the todo options live.
+   *  - Paragraph and Selection open it only when there is something to say — pins that could become
+   *    citekeys, or an error/warning worth seeing. Otherwise they just run and toast.
    */
-  const runPaperExport = async (
-    todoExportMode: Rem2TexTodoExportMode,
-    commandLabel: string
-  ): Promise<void> => {
+  const openConvertPopup = async (request: Rem2TexConvertRequest): Promise<void> => {
+    await plugin.storage.setSession(REM2TEX_CONVERT_REQUEST_KEY, request);
+    await plugin.widget.openPopup(REM2TEX_CONVERT_WIDGET);
+  };
+
+  const runConvert = async (kind: Rem2TexConvertKind, alwaysShowUi: boolean): Promise<void> => {
     try {
-      const result = await runRem2TexConversion(plugin, { todoExportMode, commandLabel });
-      if (result.status === 'success') {
-        await plugin.app.toast(
-          result.warningCount > 0
-            ? `Rem2Tex: exported “${result.outputTitle}” with ${result.warningCount} warning(s) — check its Log.`
-            : `Rem2Tex: exported “${result.outputTitle}”.`
-        );
-      } else {
-        await plugin.app.toast(
-          `Rem2Tex failed: ${result.errorHeadline}. See the Log under “${result.outputTitle}”.`
-        );
+      const selectedRemIds = kind === 'selection' ? await getSelectedRemIds(plugin) : undefined;
+      if (alwaysShowUi) {
+        await openConvertPopup({ kind, selectedRemIds });
+        return;
       }
+      const preview = await previewRem2TexConvert(plugin, { kind, selectedRemIds });
+      if (preview.pinRows.length > 0 || preview.issues.length > 0) {
+        await openConvertPopup({ kind, selectedRemIds });
+        return;
+      }
+      // Nothing to convert and nothing wrong: just do it.
+      const result = await runRem2TexConvert(plugin, { kind, selectedRemIds });
+      if (result.status === 'failed') {
+        // Only reachable if a kind that reports instead of throwing ever takes this path.
+        await plugin.app.toast(
+          `Rem2Tex failed: ${result.errorHeadline ?? 'the conversion did not finish'}. ` +
+            `See the Log under “${result.outputTitle}”.`
+        );
+        return;
+      }
+      const extra =
+        kind === 'selection' && result.citationCount !== undefined
+          ? ` with ${result.citationCount} reference(s)${result.missingMetadataCount ? ` — ${result.missingMetadataCount} without Zotero metadata` : ''}`
+          : '';
+      await plugin.app.toast(`Rem2Tex: exported “${result.outputTitle}”${extra}.`);
     } catch (error) {
-      // Nothing was written (no paper found, or the export rems could not be created).
       await plugin.app.toast(`Rem2Tex: ${failureMessage(error)}`);
     }
   };
 
-  // Convert the focused Paper rem tree into LaTeX and copy all todos as comments.
   await plugin.app.registerCommand({
     id: 'rem2tex-convert-paper',
-    name: 'Rem2Tex: Convert Paper to TeX (Copy All Todos as Comments)',
+    name: 'Rem2Tex: Convert Paper to TeX',
     description:
-      'Convert a Paper rem tree into LaTeX using Preamble/End and heading-formatted sections; copy all todos as `% TODO ...` comments.',
+      'Convert a Paper rem tree into LaTeX. Opens a preview where you choose how todos are handled and which Zotero pins become citekeys.',
     quickCode: 'rem2tex',
-    action: async () => runPaperExport('all', 'Convert Paper to TeX (Copy All Todos as Comments)'),
+    action: async () => runConvert('paper', true),
   });
 
-  // Convert and copy only unfinished todos as comments.
   await plugin.app.registerCommand({
-    id: 'rem2tex-convert-paper-unfinished-todos',
-    name: 'Rem2Tex: Convert Paper to TeX (Copy Unfinished Todos as Comments)',
+    id: 'rem2tex-paragraph-to-tex',
+    name: 'Rem2Tex: Convert Paragraph to TeX',
     description:
-      'Convert a Paper rem tree into LaTeX and copy only unfinished todos as `% TODO ...` comments.',
-    quickCode: 'rem2tex-unfinished',
-    action: async () =>
-      runPaperExport('unfinished', 'Convert Paper to TeX (Copy Unfinished Todos as Comments)'),
+      'Convert the focused rem and its descendants to LaTeX, as a child export. Opens a preview only when there are pins to convert or something to flag.',
+    quickCode: 'rem2tex-paragraph',
+    action: async () => runConvert('paragraph', false),
   });
 
-  // Convert and do not copy todos as comments.
   await plugin.app.registerCommand({
-    id: 'rem2tex-convert-paper-no-todos',
-    name: 'Rem2Tex: Convert Paper to TeX (Do Not Copy Todos as Comments)',
-    description: 'Convert a Paper rem tree into LaTeX and skip todo comment output.',
-    quickCode: 'rem2tex-no-todos',
-    action: async () => runPaperExport('none', 'Convert Paper to TeX (Do Not Copy Todos as Comments)'),
+    id: 'rem2tex-selection-to-tex',
+    name: 'Rem2Tex: Convert Selection to TeX (Numbered Citations + Bibliography)',
+    description:
+      'Convert the selected rem(s) to LaTeX with `[1]`-style citations and a numbered bibliography. Opens a preview only when there are pins to convert or something to flag.',
+    quickCode: 'rem2tex-selection',
+    action: async () => runConvert('selection', false),
   });
 
   // Tag / untag the focused rem so exports skip it (and its subtree) without remembering the tag name.
@@ -158,55 +178,6 @@ async function onActivate(plugin: ReactRNPlugin) {
         );
       } catch (error) {
         await plugin.app.toast(`Rem2Tex: ${failureMessage(error)}`);
-      }
-    },
-  });
-
-  // Selected rem(s) -> one LaTeX code block with numbered citations and a numbered bibliography.
-  await plugin.app.registerCommand({
-    id: 'rem2tex-selection-to-tex',
-    name: 'Rem2Tex: Selection to TeX (Numbered Citations + Bibliography)',
-    description:
-      'Convert the selected rem(s) and their descendants to LaTeX with `[1]`-style citations and a numbered bibliography built from the Zotero item properties. One rem: the export is its child. Several: a sister right after them.',
-    quickCode: 'rem2tex-selection',
-    action: async () => {
-      try {
-        const result = await runSelectionToTexConversion(plugin, {
-          selectedRemIds: await getSelectedRemIds(plugin),
-        });
-        const scope =
-          result.remCount === 1
-            ? `“${result.exportedTitles[0] ?? 'the selected rem'}”`
-            : `${result.remCount} rems (${result.exportedTitles.join(', ')})`;
-        const citations =
-          result.citationCount === 0
-            ? 'no citations'
-            : `${result.citationCount} reference(s)`;
-        const missing =
-          result.missingMetadataCount > 0
-            ? ` — ${result.missingMetadataCount} without Zotero metadata, see the bibliography.`
-            : '.';
-        await plugin.app.toast(
-          `Rem2Tex: exported ${scope} to “${result.outputTitle}” with ${citations}${missing}`
-        );
-      } catch (error) {
-        await plugin.app.toast(`Rem2Tex selection export failed: ${failureMessage(error)}`);
-      }
-    },
-  });
-
-  await plugin.app.registerCommand({
-    id: 'rem2tex-paragraph-to-tex',
-    name: 'Rem2Tex: Paragraph to TeX',
-    description:
-      'Convert the focused rem (and its descendants) to LaTeX using the same rules as paper body text. All todos are copied as `% TODO ...` comments. Inserts a child export with a LaTeX code block.',
-    quickCode: 'rem2tex-paragraph',
-    action: async () => {
-      try {
-        const title = await runParagraphToTexConversion(plugin);
-        await plugin.app.toast(`Rem2Tex: added “${title}” with LaTeX under this rem.`);
-      } catch (error) {
-        await plugin.app.toast(`Rem2Tex paragraph export failed: ${failureMessage(error)}`);
       }
     },
   });

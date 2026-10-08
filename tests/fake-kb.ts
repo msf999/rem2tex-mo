@@ -72,7 +72,18 @@ export function createFakeKb() {
     return r;
   }
 
+  /** The rem the focus chain resolves to; set with `focus(rem)` before calling an entry point. */
+  let focused: FakeRem | undefined;
+
   const plugin: any = {
+    // Enough of the focus chain for `getFocusedParentRem` to resolve a target.
+    focus: { getFocusedRem: async () => focused },
+    editor: { getSelectedRem: async () => undefined, getSelection: async () => undefined },
+    window: { getFocusedPaneId: async () => undefined, getOpenPaneRemId: async () => undefined },
+    storage: {
+      setSession: async () => undefined,
+      getSession: async () => undefined,
+    },
     rem: {
       findOne: async (id: string) => rems[id],
       createRem: async () => mk(`new${++captured.created}`, [], null),
@@ -90,7 +101,7 @@ export function createFakeKb() {
     },
   };
 
-  return { rems, mk, plugin, captured };
+  return { rems, mk, plugin, captured, focus: (rem: FakeRem) => { focused = rem; } };
 }
 
 /** A `latex` code-block text element. */

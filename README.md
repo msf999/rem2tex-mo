@@ -15,10 +15,17 @@ into a complete `.tex` document and writes it — with a readable conversion log
 knowledge base. Another takes just the rems you have selected and gives you `[1]`-style numbered
 citations with a matching bibliography, built from your Zotero item properties.
 
+Converting a paper opens a **preview** first: it shows what will be exported, lets you choose how
+todos are handled, and lists the Zotero pins it can turn into visible citekeys — see
+[Pins that become citekeys](#pins-that-become-citekeys).
+
 > [!IMPORTANT]
-> **Exports only ever add.** A conversion creates a new `Rem2Tex <timestamp>` (or
-> `Rem2Tex selection <timestamp>`) rem and never edits or deletes anything else. The one command that
-> modifies a rem is `/rem2tex-ignore`, which toggles the `Rem2Tex-ignore` tag on the rem you run it on.
+> **Exporting only ever adds. Two things change your rems, and both need your say-so.** A conversion
+> creates a new `Rem2Tex <timestamp>` (or `Rem2Tex paragraph` / `Rem2Tex selection <timestamp>`) rem
+> and never edits or deletes anything else. The exceptions: leaving **Convert N pins to citekeys**
+> ticked in the preview rewrites the prose rems that the preview lists — it keeps your pins and
+> records every change under `Rem2Tex rewrite <timestamp>` — and `/rem2tex-ignore` toggles the
+> `Rem2Tex-ignore` tag on the rem you run it on. Nothing is ever deleted.
 
 > [!WARNING]
 > **Vibe-coded — experimental.** Built largely by prompting an AI assistant, with light human review.
@@ -36,7 +43,7 @@ Paper (any name)
 ├─ Abstract                      ← heading → \section{Abstract}
 │  └─ We study …                    prose → escaped paragraph
 ├─ Introduction                  ← heading
-│  ├─ As shown \cite{ ⟨pin → Zotero/Items/smith2020⟩ } …
+│  ├─ As shown ⟨pin → Zotero/Items/smith2020⟩ …    pin → \cite{smith2020}
 │  ├─ % reviewer 2 asked for more context here     ← % rem → comment line
 │  └─ ☐ add the missing numbers                    ← todo → % TODO [ ] add the …
 ├─ Results
@@ -47,9 +54,10 @@ Paper (any name)
 │  └─ [latex code block]
 ├─ Supplementary Information     ← anything after End is ignored
 └─ Rem2Tex                       ← created by Rem2Tex, one child per run
-   └─ Rem2Tex 03:23 PM 03-09-2026
-      ├─ Paper  → [latex code block]   the whole document
-      └─ Log    → [text code block]    the conversion log
+   ├─ Rem2Tex 03:23 PM 03-09-2026
+   │  ├─ Paper  → [latex code block]   the whole document
+   │  └─ Log    → [text code block]    the conversion log
+   └─ Rem2Tex rewrite 03:23 PM 03-09-2026    ← only if you ticked the citekey option
 ```
 
 Run the command on the paper rem **or on any of its children** — Rem2Tex checks the focused rem, then
@@ -61,21 +69,24 @@ its parent.
 
 1. **Structure your paper** as above: `Preamble` and `End` children, each with a code block, and your
    sections between them.
-2. **Type `/rem2tex`** on the paper rem (or any child), then copy the `Paper` code block into your
-   `.tex` project — and read the `Log` if the toast asked you to.
+2. **Type `/rem2tex`** on the paper rem (or any child). A preview opens: pick how todos are handled,
+   decide whether to write citekeys beside your Zotero pins, and press **Convert and export**.
+3. Copy the `Paper` code block into your `.tex` project — and read the `Log` if the toast asked you to.
 
 ## Commands
 
-All six are prefixed **`Rem2Tex:`** in the omnibar.
+All four are prefixed **`Rem2Tex:`** in the omnibar.
 
 | Command | Quick code | What it does |
 | --- | --- | --- |
-| **Convert Paper to TeX (Copy All Todos as Comments)** | `rem2tex` | Export the paper; every todo becomes a `% TODO` comment. |
-| **Convert Paper to TeX (Copy Unfinished Todos as Comments)** | `rem2tex-unfinished` | The same, but finished todos vanish with their subtrees. |
-| **Convert Paper to TeX (Do Not Copy Todos as Comments)** | `rem2tex-no-todos` | The same, with no todo comments at all. |
-| **Selection to TeX (Numbered Citations + Bibliography)** | `rem2tex-selection` | Convert the selected rem(s) into one code block whose citations are `[1]`, `[2]` … followed by a numbered bibliography. See [Numbered citations](#numbered-citations-and-the-bibliography). |
-| **Paragraph to TeX** | `rem2tex-paragraph` | Convert just the focused rem and its descendants into a `Rem2Tex paragraph <timestamp>` child. No log; if it yields nothing, the toast says so. |
+| **Convert Paper to TeX** | `rem2tex` | Export the paper. Always opens the preview, because that is where you choose the todo mode. |
+| **Convert Paragraph to TeX** | `rem2tex-paragraph` | Convert the focused rem and its descendants into a `Rem2Tex paragraph <timestamp>` child. No log. |
+| **Convert Selection to TeX (Numbered Citations + Bibliography)** | `rem2tex-selection` | Convert the selected rem(s) into one code block whose citations are `[1]`, `[2]` … followed by a numbered bibliography. See [Numbered citations](#numbered-citations-and-the-bibliography). |
 | **Toggle Rem2Tex-ignore tag on this rem** | `rem2tex-ignore` | Add or remove the `Rem2Tex-ignore` tag, creating the tag rem the first time. |
+
+**Paragraph** and **Selection** only open the preview when there is something to say — pins that could
+become citekeys, or a problem worth seeing. Otherwise they just run and toast. The todo choice is
+offered for papers only; Paragraph and Selection always comment every todo.
 
 ---
 
@@ -101,6 +112,57 @@ items you added there by hand count too, and a pin to a note nested inside an it
 > Cite by pinning the item, inside a typed `\cite{…}` if you like: typed commands are never doubled
 > and adjacent citations merge into `\cite{a, b}`. Rem2Tex never generates `\ref{}` — type
 > `\ref{fig:setup}` yourself, and a pin inside `\ref{…}` is dropped like any other pin.
+
+---
+
+## Pins that become citekeys
+
+A pin to a Zotero item exports as `\cite{citekey}`, but in Remnote it shows only as a pin icon — so
+while drafting you cannot see *which* paper you cited without clicking. Rem2Tex can write the citekey
+into the rem for you and **keep the pin**, so you get both: the key is readable in the outline, and
+the pin still takes you to the exact passage you took the claim from.
+
+Every preview lists the pins it can convert, with the before and after text. Leave **Convert N pins
+to citekeys** ticked — it is ticked by default whenever there is at least one — and they are written
+when you press Convert.
+
+```
+before    This matters ⟨pin⟩.
+after     This matters \cite{smith2020⟨pin⟩}.
+```
+
+The citekey is written as a **rem reference** to the item's page, not as plain text — so it still
+reads as a link, renames itself if you rename the item, and matches how you would have typed the
+citation by hand. The pin goes **inside** the braces, next to the key it belongs to:
+
+| In the outline | Becomes |
+| --- | --- |
+| `⟨pin A⟩` | `\cite{keyA⟨pin A⟩}` |
+| `⟨pin A⟩⟨pin B⟩` (or separated by spaces) | `\cite{keyA⟨pin A⟩, keyB⟨pin B⟩}` — one command, both works |
+| the same paper pinned twice | `\cite{keyA⟨pin A⟩⟨pin A⟩}` — one key, both pins kept |
+| `\supercite{⟨pin A⟩}` you typed yourself | `\supercite{keyA⟨pin A⟩}` — your command is kept |
+
+> [!IMPORTANT]
+> **The exported LaTeX does not change.** Converting is a convenience for reading your own outline,
+> never a change to the document: the `.tex` you get is byte-identical before and after. (One
+> improvement, not a change: if you had typed a key and pinned the paper right after it with no
+> comma, `\cite{other2000⟨pin⟩}`, that used to export as the single nonexistent key
+> `\cite{other2000smith2020}`. Converting separates them properly.)
+
+A citation you wrote with a page note keeps it to itself: `\cite[p. 3]{smith2020}` next to a pin for
+another paper gets that paper its own `\cite{...}` rather than being folded in, so the "p. 3" never
+spreads to a work you did not apply it to.
+
+What it will **not** touch: code blocks, image rems, `Preamble` and `End`, anything tagged
+`Rem2Tex-ignore`, Rem2Tex's own earlier exports, anything inside the `Zotero` tree itself, and pins
+that point anywhere other than a Zotero item (those are navigation, and they stay pins). A rem whose
+pin already has its citekey beside it is left alone, so running the command twice changes nothing the
+second time.
+
+Every converted rem is recorded under **`Rem2Tex rewrite <timestamp>`**, holding each rem's id and its
+text before and after — so you can see exactly what changed, and put it back by hand if you want to.
+If you edit one of the listed rems between opening the preview and pressing Convert, that rem is
+skipped rather than overwritten.
 
 ---
 
@@ -180,10 +242,11 @@ body rems were converted, what was ignored) · **Conversion** (block sizes, `\do
 (`SUCCESS` with the line count, or the failure with what happened, the rem, its path and suggestions).
 Copy it into a bug report when asking for help.
 
-Problems found before a paper is located are toasted and nothing is written: no focused rem, or the
-focused rem and its parent are both not papers — the toast says what is missing on each (no
-`Preamble`, no `End` after it, or nothing between them). An empty `Preamble`/`End` block, or a failure
-part-way through the conversion, still writes an export rem with the log in it.
+Problems found before a paper is located are shown **in the preview**, at the top, rather than
+toasted: no focused rem, or the focused rem and its parent are both not papers — it says what is
+missing on each (no `Preamble`, no `End` after it, or nothing between them) and leaves the Convert
+button disabled. An empty `Preamble`/`End` block, or a failure part-way through the conversion, still writes an
+export rem with the log in it.
 
 ## Details worth knowing
 
@@ -202,3 +265,6 @@ part-way through the conversion, still writes an export rem with the log in it.
 - **`Rem2Tex-ignore` must be the top-level rem** with exactly that name (the toggle command creates it
   there); a same-named rem nested elsewhere is not recognised.
 - **Remnote's own bold/italic/underline are not converted** — type the LaTeX you want.
+- **The citekey rewrite preserves everything else in the rem** — bold, maths, clozes and your other
+  references are carried across untouched, because only the pins and the text around them are
+  rewritten.

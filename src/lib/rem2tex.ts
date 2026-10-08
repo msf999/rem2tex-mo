@@ -1,4 +1,4 @@
-import type { ReactRNPlugin, PluginRem as Rem } from '@remnote/plugin-sdk';
+import type { RNPlugin, PluginRem as Rem } from '@remnote/plugin-sdk';
 
 const REQUIRED_PREAMBLE_NAME = 'Preamble';
 const REQUIRED_END_NAME = 'End';
@@ -356,7 +356,7 @@ function isRem2TexOutputRem(rem: Rem): boolean {
   const t = flattenRawTitleText(rem.text).trim();
   return (
     t === 'Rem2Tex' ||
-    /^Rem2Tex( paragraph| selection)? \d\d:\d\d [AP]M \d\d-\d\d-\d{4}$/.test(t)
+    /^Rem2Tex( paragraph| selection| rewrite)? \d\d:\d\d [AP]M \d\d-\d\d-\d{4}$/.test(t)
   );
 }
 
@@ -375,7 +375,7 @@ async function collectParagraphExportSkipRemIds(paragraphRem: Rem): Promise<Set<
 
 /** Same shape as full-paper export: titled rem + LaTeX code child. */
 async function createParagraphLatexExport(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   paragraphRem: Rem,
   latex: string
 ): Promise<string> {
@@ -951,7 +951,7 @@ function rawTitleEquals(rem: Rem, expected: string): boolean {
  * (so no powerup tag is required). Walks up from `rem`; returns the item doc (the direct child of
  * `Items` on the path, possibly `rem` itself) or undefined.
  */
-async function findZoteroItemDoc(plugin: ReactRNPlugin, rem: Rem): Promise<Rem | undefined> {
+async function findZoteroItemDoc(plugin: RNPlugin, rem: Rem): Promise<Rem | undefined> {
   let candidate: Rem = rem;
   let parent: Rem | undefined = rem.parent ? await plugin.rem.findOne(rem.parent) : undefined;
   let hops = 0;
@@ -999,7 +999,7 @@ function flattenRawTitleText(element: unknown, depth = 0): string {
 
 /** `\cite{key}` for a Zotero item doc — its title is the citekey (Remzot names item docs that way). */
 async function zoteroCitationForItem(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   itemDoc: Rem,
   options: FlattenOptions,
   seenRemIds: Set<string>,
@@ -1021,7 +1021,7 @@ async function zoteroCitationForItem(
 }
 
 async function flattenRichTextElement(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   element: unknown,
   options: FlattenOptions = {},
   seenRemIds: Set<string> = new Set(),
@@ -1135,8 +1135,137 @@ async function flattenRichTextElement(
   return '';
 }
 
+/**
+ * A pin kept beside a written-out citekey (the `/rem2tex-citekeys` rewrite) still resolves to its
+ * own `\cite{key}`, which would double the citation. `normalizeAdjacentCitations` only collapses
+ * that for the literal `\cite{…}`; every other wrapper (`\supercite`, `\citep`, `\citeauthor`, …)
+ * would emit a visible duplicate — and `\nocite{k}\cite{k}` would turn an invisible citation into a
+ * visible one.
+ *
+ * So: drop a `\cite{X}` whose keys are all already named by the nearest RETAINED citation command on
+ * either side, reaching across whitespace and across spans already dropped. "Either side" matters —
+ * a hand-written `<pin>\supercite{k}` puts the generated citation first. The whitespace gap goes
+ * with it, so no stray space is left behind.
+ *
+ * Runs AFTER `unwrapNestedCitationCommands`: a mid-edit `\supercite{` + pin + `}` + pin flattens to
+ * `\supercite{\cite{k}}\cite{k}`, whose argument is not a plain key list until the unwrap has run.
+ */
+export function dropCitationsCoveredByAdjacentCommand(text: string): string {
+  if (!text.includes('\\cite{')) return text;
+
+  type Found = { start: number; end: number; name: string; keys: string[]; plainArg: boolean };
+  const found: Found[] = [];
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const slash = text.indexOf('\\', cursor);
+    if (slash === -1) break;
+    let nameEnd = slash + 1;
+    while (nameEnd < text.length && /[A-Za-z]/.test(text[nameEnd])) nameEnd += 1;
+    const name = text.slice(slash + 1, nameEnd);
+    if (!CITATION_WRAPPER_COMMANDS.has(name) || isEscaped(text, slash)) {
+      cursor = slash + 1;
+      continue;
+    }
+    let argStart = nameEnd;
+    if (text[argStart] === '*') argStart += 1;
+    while (text[argStart] === '[') {
+      const optionEnd = findMatchingGroup(text, argStart, '[', ']');
+      if (optionEnd === -1) break;
+      argStart = optionEnd;
+    }
+    if (text[argStart] !== '{') {
+      cursor = argStart === nameEnd ? slash + 1 : argStart;
+      continue;
+    }
+    const argEnd = findMatchingGroup(text, argStart, '{', '}');
+    if (argEnd === -1) {
+      cursor = argStart + 1;
+      continue;
+    }
+    const inner = text.slice(argStart + 1, argEnd - 1);
+    found.push({
+      start: slash,
+      end: argEnd,
+      name,
+      keys: inner.split(',').map((k) => k.trim()).filter((k) => k.length > 0),
+      // Only a plain key list can be compared; `\cite{\cite{k}}` and `\cite{\textbf{x}}` cannot.
+      plainArg: /^[^{}\\]*$/.test(inner),
+    });
+    cursor = argEnd;
+  }
+
+  if (found.length < 2) return text;
+
+  // A bare `\cite{…}` is the only thing the flattener generates from a pin, so only those are
+  // candidates for removal; everything else is the author's own text.
+  const dropped = new Set<number>();
+  const covers = (host: Found, victim: Found): boolean =>
+    host.plainArg &&
+    victim.keys.length > 0 &&
+    victim.keys.every((key) => host.keys.includes(key));
+
+  /** The nearest retained command on one side, skipping whitespace and already-dropped spans. */
+  const neighbourOn = (i: number, step: -1 | 1): number | undefined => {
+    let j = i + step;
+    let gapFrom = step === -1 ? found[i].start : found[i].end;
+    while (j >= 0 && j < found.length) {
+      if (dropped.has(j)) {
+        gapFrom = step === -1 ? found[j].start : found[j].end;
+        j += step;
+        continue;
+      }
+      const gap = step === -1 ? text.slice(found[j].end, gapFrom) : text.slice(gapFrom, found[j].start);
+      return /^\s*$/.test(gap) ? j : undefined;
+    }
+    return undefined;
+  };
+
+  // Which side the survivor sits on, so only the gap between the two is swallowed.
+  const swallow = new Map<number, -1 | 1>();
+  for (let i = 0; i < found.length; i += 1) {
+    const victim = found[i];
+    if (victim.name !== 'cite' || !victim.plainArg || victim.keys.length === 0) continue;
+
+    const left = neighbourOn(i, -1);
+    if (left !== undefined && covers(found[left], victim)) {
+      dropped.add(i);
+      swallow.set(i, -1);
+      continue;
+    }
+    const right = neighbourOn(i, 1);
+    if (right !== undefined && covers(found[right], victim)) {
+      // Mutual cover (`\cite{k}\cite{k}`): keep the FIRST, so the author's own text and the
+      // spacing in front of it survive, and let the later duplicate be the one dropped.
+      if (found[right].name === 'cite' && covers(victim, found[right])) continue;
+      dropped.add(i);
+      swallow.set(i, 1);
+    }
+  }
+
+  if (dropped.size === 0) return text;
+
+  let output = '';
+  let at = 0;
+  for (let i = 0; i < found.length; i += 1) {
+    if (!dropped.has(i)) continue;
+    const side = swallow.get(i);
+    // Take the gap between the duplicate and the command that covers it, never other spacing.
+    const before = text.slice(at, found[i].start);
+    output += side === -1 ? before.replace(/\s+$/, '') : before;
+    at = found[i].end;
+    if (side === 1) {
+      const rest = text.slice(at);
+      const lead = rest.match(/^\s+/);
+      if (lead) at += lead[0].length;
+    }
+  }
+  output += text.slice(at);
+  return output;
+}
+
 export async function richTextToString(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   text?: unknown,
   options: FlattenOptions = {}
 ): Promise<string> {
@@ -1154,11 +1283,12 @@ export async function richTextToString(
   // unwrap left two typed citations adjacent.
   const merged = normalizeAdjacentCitations(trimmed);
   const unwrapped = unwrapNestedCitationCommands(merged);
-  return unwrapped === merged ? merged : normalizeAdjacentCitations(unwrapped);
+  const dropped = dropCitationsCoveredByAdjacentCommand(unwrapped);
+  return dropped === merged ? merged : normalizeAdjacentCitations(dropped);
 }
 
 export async function getRemTitle(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   context?: Rem2TexConversionContext
 ): Promise<string> {
@@ -1168,7 +1298,7 @@ export async function getRemTitle(
 }
 
 async function getBoundaryBlock(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   boundaryRem: Rem,
   label: string,
   context: Rem2TexConversionContext
@@ -1288,7 +1418,7 @@ type PaperLayout = {
  * Preamble rem anchors on that rem); otherwise the first child titled Preamble is.
  */
 async function findPaperLayout(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   paperRem: Rem,
   anchorRem?: Rem
 ): Promise<PaperLayout | undefined> {
@@ -1332,7 +1462,7 @@ async function findPaperLayout(
 
 /** One-line diagnosis of why `rem` is not a paper (for the NOT_A_PAPER toast). */
 async function explainNotAPaper(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   anchorRem?: Rem
 ): Promise<string> {
@@ -1366,7 +1496,7 @@ async function explainNotAPaper(
  * (Preamble, Abstract, …). Anything else is a typed `NOT_A_PAPER` error for the command to toast.
  */
 export async function resolvePaperRoot(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   focusedRem: Rem
 ): Promise<{ paperRem: Rem; layout: PaperLayout }> {
   const own = await findPaperLayout(plugin, focusedRem);
@@ -1393,7 +1523,7 @@ export async function resolvePaperRoot(
   });
 }
 
-export async function getFocusedParentRem(plugin: ReactRNPlugin): Promise<Rem> {
+export async function getFocusedParentRem(plugin: RNPlugin): Promise<Rem> {
   const focusedRem = await plugin.focus.getFocusedRem();
   if (focusedRem) return focusedRem;
 
@@ -1430,7 +1560,7 @@ export async function getFocusedParentRem(plugin: ReactRNPlugin): Promise<Rem> {
 }
 
 async function todoComment(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<string> {
@@ -1479,8 +1609,25 @@ function stripTodoCommentArtifactCitations(text: string): string {
     .trim();
 }
 
+/**
+ * Drop a citation or reference command whose argument came out EMPTY.
+ *
+ * Comment-tree labels are built from `flattenRawTitleText`, which deliberately ignores `i:'q'`
+ * elements — so a rem whose citation argument is nothing but references (`\cite{` + ref + `}`,
+ * which is exactly what the citekey rewrite writes) collapses to a bare `\cite{}` in the label.
+ * An empty citation is never wanted in a comment, and stripping it also keeps the rewrite
+ * output-neutral: the same child labels identically whether its work is named by a pin or by a
+ * written citekey.
+ */
+function stripEmptyCitationCommands(text: string): string {
+  if (!text.includes('{}')) return text;
+  const names = [...CITATION_WRAPPER_COMMANDS, ...REFERENCE_WRAPPER_COMMANDS].join('|');
+  // `\cite`, `\cite*`, `\cite[p. 1]` … followed by an empty or whitespace-only argument.
+  return text.replace(new RegExp(`\\\\(?:${names})\\*?(?:\\[[^\\]]*\\])*\\{\\s*\\}`, 'g'), '').trim();
+}
+
 async function getCommentTreeLabel(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<string> {
@@ -1491,6 +1638,7 @@ async function getCommentTreeLabel(
     raw = diag.replace(/\s+/g, ' ').trim();
   }
   raw = stripTodoCommentArtifactCitations(raw);
+  raw = stripEmptyCitationCommands(raw);
   const single = raw.replace(/\s+/g, ' ').trim();
   if (!single) return '';
   if (single.length <= TODO_COMMENT_LABEL_MAX) return single;
@@ -1512,7 +1660,7 @@ export const REM2TEX_IGNORE_TAG = 'Rem2Tex-ignore';
  * the tag's reverse lookup (`taggedRem`). `undefined` when no such tag rem exists — then no
  * per-rem check happens at all, so authors who never use the tag pay nothing.
  */
-async function loadIgnoredRemIds(plugin: ReactRNPlugin): Promise<Set<string> | undefined> {
+async function loadIgnoredRemIds(plugin: RNPlugin): Promise<Set<string> | undefined> {
   try {
     const tagRem = await findIgnoreTagRem(plugin);
     if (!tagRem) return undefined;
@@ -1528,7 +1676,7 @@ async function loadIgnoredRemIds(plugin: ReactRNPlugin): Promise<Set<string> | u
  * log. Membership comes from `context.ignoredRemIds` (see `loadIgnoredRemIds`) — no SDK call here.
  */
 async function isIgnoredRem(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<boolean> {
@@ -1547,7 +1695,7 @@ async function isIgnoredRem(
 }
 
 /** The KB's canonical `Rem2Tex-ignore` tag rem: the TOP-LEVEL one, which is what exports honour. */
-export async function findIgnoreTagRem(plugin: ReactRNPlugin): Promise<Rem | undefined> {
+export async function findIgnoreTagRem(plugin: RNPlugin): Promise<Rem | undefined> {
   return plugin.rem.findByName([REM2TEX_IGNORE_TAG], null);
 }
 
@@ -1557,7 +1705,7 @@ export async function findIgnoreTagRem(plugin: ReactRNPlugin): Promise<Rem | und
  * Add-vs-remove is decided against the SAME rem exports honour (the top-level tag), so the toast can
  * never claim a rem "exports again" when a look-alike tag nested elsewhere never hid it.
  */
-export async function toggleIgnoreTag(plugin: ReactRNPlugin, rem: Rem): Promise<'added' | 'removed'> {
+export async function toggleIgnoreTag(plugin: RNPlugin, rem: Rem): Promise<'added' | 'removed'> {
   const canonical = await findIgnoreTagRem(plugin);
   if (canonical) {
     const tagged = (await rem.getTagRems()).some((tag) => tag._id === canonical._id);
@@ -1608,7 +1756,7 @@ function isCommentRem(rem: Rem): boolean {
  * and every line of a multi-line text carries its own `%`.
  */
 async function commentRemLines(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<string> {
@@ -1639,7 +1787,7 @@ function emitIndentedCommentBlock(output: string[], raw: string, depth: number):
 
 /** Emit direct children of a todo / `%` comment rem as indented `%` comment lines and recurse. */
 async function emitTodoChildrenAsCommentTree(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   parentRem: Rem,
   output: string[],
   context: Rem2TexConversionContext,
@@ -1688,7 +1836,7 @@ async function emitTodoChildrenAsCommentTree(
 }
 
 async function getRemBodyText(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<{ text: string; fromCodeBlock: boolean }> {
@@ -1725,7 +1873,7 @@ async function getRemBodyText(
  * is wrapped as `REM_CONVERSION_FAILED` so the popup can still point at the rem.
  */
 async function enrichConversionErrorWithSourceRem(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   error: unknown,
   rem: Rem,
   context: Rem2TexConversionContext,
@@ -1807,7 +1955,7 @@ async function enrichConversionErrorWithSourceRem(
 }
 
 async function getRelativeSourceRemHierarchy(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<string[] | undefined> {
@@ -1874,7 +2022,7 @@ function inferMediaTypeFromLatex(codeText: string): 'figure' | 'table' | undefin
 }
 
 async function getMediaCodeBlocksFromImmediateChildren(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<{ blocks: string[]; nonMediaChildren: Rem[] }> {
@@ -1918,7 +2066,7 @@ async function getMediaCodeBlocksFromImmediateChildren(
 
 /** Hierarchy path for a log line; never throws (diagnostics must not mask the export). */
 async function safeHierarchyPath(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<string | undefined> {
@@ -1937,7 +2085,7 @@ function quoteTitles(rems: Rem[], max = 5): string {
 
 /** Count a todo skipped by the todo mode and warn when non-todo content vanishes with it. */
 async function noteSkippedTodo(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<void> {
@@ -1990,7 +2138,7 @@ function toOutlineLocation(
 }
 
 async function serializeNode(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   rem: Rem,
   currentHeadingLevel: number,
   output: string[],
@@ -2302,7 +2450,7 @@ function collectReferenceIds(element: unknown, depth = 0, out: string[] = []): s
 }
 
 /** A referenced rem's own name, preferring its raw text (Remzot's lookup rems are plain rems). */
-async function referencedRemName(plugin: ReactRNPlugin, remId: string): Promise<string> {
+async function referencedRemName(plugin: RNPlugin, remId: string): Promise<string> {
   try {
     const target = await plugin.rem.findOne(remId);
     if (!target) return '';
@@ -2318,7 +2466,7 @@ async function referencedRemName(plugin: ReactRNPlugin, remId: string): Promise<
  * docs, and the DOI as a link rem whose display text is the bare DOI).
  */
 async function flattenZoteroSlotValue(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   element: unknown,
   depth = 0
 ): Promise<string> {
@@ -2346,7 +2494,7 @@ async function flattenZoteroSlotValue(
  * read back as `Ke, Xu Smith, Jane Doe, John`. The role suffixes Remzot appends for non-author
  * creators (` (editor)`) are dropped — a numeric bibliography lists the names.
  */
-async function splitZoteroAuthors(plugin: ReactRNPlugin, element: unknown): Promise<string[]> {
+async function splitZoteroAuthors(plugin: RNPlugin, element: unknown): Promise<string[]> {
   const ids = collectReferenceIds(element);
   if (ids.length > 0) {
     const names: string[] = [];
@@ -2376,7 +2524,7 @@ const ZOTERO_LOOKUP_DOC_SLOTS: Record<string, keyof typeof ZOTERO_SLOTS> = {
  * Which lookup doc under `Zotero` a referenced rem lives in (`Zotero/Authors/Doe, Jane` -> `Authors`,
  * and `Zotero/Dates/2022/07` -> `Dates`, since the date tree is nested). '' when it is somewhere else.
  */
-async function zoteroLookupDocNameFor(plugin: ReactRNPlugin, remId: string): Promise<string> {
+async function zoteroLookupDocNameFor(plugin: RNPlugin, remId: string): Promise<string> {
   try {
     let candidate = await plugin.rem.findOne(remId);
     if (!candidate) return '';
@@ -2401,7 +2549,7 @@ const LINK_POWERUP = 'b';
 const LINK_URL_SLOT = 'URL';
 
 /** True when this rem is a RemNote link rem, i.e. it actually carries an address. */
-async function linkRemUrl(plugin: ReactRNPlugin, remId: string): Promise<string> {
+async function linkRemUrl(plugin: RNPlugin, remId: string): Promise<string> {
   try {
     const linkRem = await plugin.rem.findOne(remId);
     if (!linkRem) return '';
@@ -2416,7 +2564,7 @@ async function linkRemUrl(plugin: ReactRNPlugin, remId: string): Promise<string>
  * text is a PRETTIFIED address (scheme dropped, `-` shown as a space) that is not a usable URL — so
  * the real one is read from the link rem's built-in `b`/`URL` slot, falling back to that text.
  */
-async function resolveZoteroLinkUrl(plugin: ReactRNPlugin, element: unknown): Promise<string> {
+async function resolveZoteroLinkUrl(plugin: RNPlugin, element: unknown): Promise<string> {
   for (const id of collectReferenceIds(element)) {
     const url = await linkRemUrl(plugin, id);
     if (url) return url;
@@ -2441,7 +2589,7 @@ async function resolveZoteroLinkUrl(plugin: ReactRNPlugin, element: unknown): Pr
  * references at all is the Title, and a reference whose text is a bare DOI is the DOI.
  */
 async function readZoteroSlotsByChildWalk(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   itemDoc: Rem
 ): Promise<Map<string, unknown>> {
   const found = new Map<string, unknown>();
@@ -2504,7 +2652,7 @@ async function readZoteroSlotsByChildWalk(
 
 /** Read Remzot's bibliographic slots off an item doc. Never throws — a bad read reads as empty. */
 async function readZoteroItemMetadata(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   citekey: string,
   itemDoc: Rem | undefined
 ): Promise<Rem2TexBibliographyEntry> {
@@ -2910,7 +3058,7 @@ export function renumberCitations(latex: string): { latex: string; keys: string[
  * titled `Zotero` (`findByName` returns just one, which may be the empty one).
  */
 async function findZoteroItemsDoc(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   knownItemDocs: Iterable<Rem>
 ): Promise<Rem | undefined> {
   for (const itemDoc of knownItemDocs) {
@@ -2932,7 +3080,7 @@ async function findZoteroItemsDoc(
 
 /** The item doc for a citekey nobody pinned — the author typed `\cite{key}` by hand. */
 async function lookupZoteroItemByCitekey(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   itemsDoc: Rem | undefined,
   citekey: string
 ): Promise<Rem | undefined> {
@@ -2945,7 +3093,7 @@ async function lookupZoteroItemByCitekey(
 }
 
 /** One selected rem per exported subtree: no duplicates, no rem already inside another, in outline order. */
-async function normalizeSelectionRems(plugin: ReactRNPlugin, rems: Rem[]): Promise<Rem[]> {
+async function normalizeSelectionRems(plugin: RNPlugin, rems: Rem[]): Promise<Rem[]> {
   const byId = new Map<string, Rem>();
   for (const rem of rems) {
     if (!byId.has(rem._id)) byId.set(rem._id, rem);
@@ -2980,7 +3128,7 @@ async function normalizeSelectionRems(plugin: ReactRNPlugin, rems: Rem[]): Promi
  * The position is always passed explicitly: the SDK documents `setParent` as PREPENDING by default.
  */
 async function createSelectionLatexExport(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   anchors: Rem[],
   latex: string
 ): Promise<string> {
@@ -3021,7 +3169,7 @@ async function createSelectionLatexExport(
  * the Omnibar can steal), else the focused rem, else the rem open in the focused pane.
  */
 export async function resolveSelectionRems(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   remIds?: string[]
 ): Promise<Rem[]> {
   const ids = remIds?.filter((id) => typeof id === 'string' && id.length > 0) ?? [];
@@ -3065,7 +3213,7 @@ export type Rem2TexSelectionRunOptions = {
  * `[1]`-style numbers, followed by the matching numbered bibliography.
  */
 export async function runSelectionToTexConversion(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   options?: Rem2TexSelectionRunOptions
 ): Promise<Rem2TexSelectionRunResult> {
   try {
@@ -3158,8 +3306,450 @@ export async function runSelectionToTexConversion(
   }
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * Pin -> citekey rewrite: write `\cite{key}` into the rem and KEEP the pin.
+ *
+ * A pin renders in Remnote as a bare icon, so the author cannot see which paper it is without
+ * clicking. This writes the citekey out as visible text beside the pin; the pin survives, so it
+ * still navigates to the exact passage. The exported LaTeX is unchanged, because
+ * `dropCitationsCoveredByAdjacentCommand` makes the kept pin contribute nothing.
+ *
+ * THE INVARIANT, and the reason this is a splice rather than a re-render: every element of the
+ * original array is carried through BY REFERENCE. A flatten-and-rebuild would silently drop bold,
+ * italic, highlight, maths, images, cloze ids and the pin's own optional fields (`aliasId`,
+ * `content`, `showFullName`) — the LaTeX would be identical while the author's document degraded.
+ * `tests/citekeys.test.ts` asserts object identity of every surviving element.
+ * ---------------------------------------------------------------------------------------------- */
+
+/** A citation command found in the flattened projection of a rem's text. */
+type ProjectedCommand = {
+  name: string;
+  /** Projection offsets. `argOpen` is the `{`, `argClose` the matching `}`. */
+  start: number;
+  argOpen: number;
+  argClose: number;
+  keys: string[];
+  /** Only a plain key list can be read or extended; `\cite{\cite{k}}` cannot. */
+  plainArg: boolean;
+  /**
+   * True when the command carries `[...]` prenote/postnote options. Such a command must never
+   * ABSORB a neighbouring free pin: `\cite[p. 1]{keyB}` + a pin would silently extend "p. 1" to a
+   * work it was never written for. A pin already inside its braces is fine — the author put it there.
+   */
+  hasOptions: boolean;
+};
+
+const PIN_SENTINEL = '';
+
+/** Text-ish elements contribute their text to the projection; a pin contributes one sentinel. */
+function projectRichText(text: unknown[]): { proj: string; at: number[] } {
+  let proj = '';
+  const at: number[] = [];
+  for (const element of text) {
+    at.push(proj.length);
+    if (typeof element === 'string') {
+      proj += element;
+      continue;
+    }
+    const entry = (element ?? {}) as Record<string, unknown>;
+    if (entry.i === 'q' && typeof entry._id === 'string') {
+      proj += PIN_SENTINEL;
+      continue;
+    }
+    const plainText =
+      (entry.i === 'm' || entry.i === undefined) && typeof entry.text === 'string' && !isCodeTextElement(entry)
+        ? entry.text
+        : '';
+    proj += plainText;
+  }
+  return { proj, at };
+}
+
+/**
+ * Every citation command in the projection, found with the same escape-aware scanner shape as
+ * `replaceCitationsInCode` — deliberately not a `\{([^}]*)\}` regex, which mis-matches the outer
+ * opener against inner content on `\cite{\cite{k}}`.
+ */
+function findProjectedCitationCommands(
+  proj: string,
+  names: Set<string> = CITATION_WRAPPER_COMMANDS
+): ProjectedCommand[] | undefined {
+  const found: ProjectedCommand[] = [];
+  let cursor = 0;
+  while (cursor < proj.length) {
+    const slash = proj.indexOf('\\', cursor);
+    if (slash === -1) break;
+    let nameEnd = slash + 1;
+    while (nameEnd < proj.length && /[A-Za-z]/.test(proj[nameEnd])) nameEnd += 1;
+    const name = proj.slice(slash + 1, nameEnd);
+    if (!names.has(name) || isEscaped(proj, slash)) {
+      cursor = slash + 1;
+      continue;
+    }
+    let argOpen = nameEnd;
+    if (proj[argOpen] === '*') argOpen += 1;
+    let hasOptions = false;
+    while (proj[argOpen] === '[') {
+      const optionEnd = findMatchingGroup(proj, argOpen, '[', ']');
+      if (optionEnd === -1) break;
+      hasOptions = true;
+      argOpen = optionEnd;
+    }
+    if (proj[argOpen] !== '{') {
+      cursor = argOpen === nameEnd ? slash + 1 : argOpen;
+      continue;
+    }
+    const argEnd = findMatchingGroup(proj, argOpen, '{', '}');
+    if (argEnd === -1) {
+      // The author is mid-edit with an unbalanced brace: leave the whole rem alone.
+      return undefined;
+    }
+    // Pins inside the argument are sentinels, not keys — strip them before reading the key list,
+    // or `\cite{<pin>}` would come back out as `\cite{<U+E000>, key}`.
+    const inner = proj.slice(argOpen + 1, argEnd - 1).split(PIN_SENTINEL).join('');
+    found.push({
+      name,
+      start: slash,
+      argOpen,
+      argClose: argEnd - 1,
+      keys: inner.split(',').map((k) => k.trim()).filter((k) => k.length > 0),
+      plainArg: /^[^{}\\]*$/.test(inner),
+      hasOptions,
+    });
+    cursor = argEnd;
+  }
+  return found;
+}
+
+/** The Zotero item a reference points at: its doc id (what we link to) and its citekey. */
+export type Rem2TexCiteTarget = { itemDocId: string; key: string };
+
+/**
+ * Rewrite one rem's rich text so every Zotero pin is named by a citekey the author can read.
+ * Returns the new array, or `undefined` when nothing changes — which is what makes a re-run a no-op.
+ *
+ * The invariant it establishes: **every Zotero pin ends up INSIDE a citation command's braces,
+ * immediately after a reference to its item doc** — `\cite{⟨ref⟩⟨pin⟩, ⟨ref⟩⟨pin⟩}`. The citekey is
+ * a rem reference, not plain text, because that is how mo already cites by hand: it renders as the
+ * key and stays clickable. Keeping each pin beside its own key is what makes a multi-work citation
+ * readable — trailing pins after the `}` say nothing about which pin belongs to which paper.
+ *
+ * The original pin is never removed: it is the only thing that returns to the exact passage.
+ *
+ * `citeTargetFor` resolves any `i:'q'` element's target to its `Zotero/Items` doc, or undefined when
+ * it is not a citation (a todo, a figure, a `Status` bookkeeping reference).
+ */
+export function rewriteRichTextWithCitekeys(
+  text: unknown[],
+  citeTargetFor: (remId: string) => Rem2TexCiteTarget | undefined
+): unknown[] | undefined {
+  if (!Array.isArray(text) || text.length === 0) return undefined;
+  // A rem holding any code element is never touched: surgery is riskiest where code and prose mix,
+  // and a code block's citations are the author's own literal text.
+  if (text.some((e) => e && typeof e === 'object' && isCodeTextElement(e as Record<string, unknown>))) {
+    return undefined;
+  }
+
+  const refs = new Map<number, { isPin: boolean; target?: Rem2TexCiteTarget }>();
+  text.forEach((element, index) => {
+    const entry = (element ?? {}) as Record<string, unknown>;
+    if (entry.i !== 'q' || typeof entry._id !== 'string') return;
+    refs.set(index, { isPin: entry.pin === true, target: citeTargetFor(entry._id) });
+  });
+  const allPins = [...refs.entries()].filter(([, r]) => r.isPin && r.target).map(([i]) => i);
+  if (allPins.length === 0) return undefined;
+
+  const { proj, at } = projectRichText(text);
+  const commands = findProjectedCitationCommands(proj);
+  // An unbalanced `{` means the author is mid-edit; touching the rem could mangle what they type.
+  if (commands === undefined) return undefined;
+  // A pin inside `\ref{…}` is the author's own label placeholder — the exporter drops it by design
+  // (see *Design decisions*), and writing a citation there would invent a label. Leave those alone.
+  const referenceCommands = findProjectedCitationCommands(proj, REFERENCE_WRAPPER_COMMANDS) ?? [];
+  const citePins = allPins.filter(
+    (i) => !referenceCommands.some((c) => at[i] > c.argOpen && at[i] < c.argClose)
+  );
+  if (citePins.length === 0) return undefined;
+  const projOf = (index: number) => at[index];
+  const widthOf = (i: number) => (at[i + 1] ?? proj.length) - at[i];
+
+  const hostOf = (index: number) =>
+    commands.find((c) => projOf(index) > c.argOpen && projOf(index) < c.argClose);
+  const indicesInside = (c: ProjectedCommand) =>
+    [...refs.keys()].filter((i) => projOf(i) > c.argOpen && projOf(i) < c.argClose);
+
+  const refElement = (target: Rem2TexCiteTarget) => ({ i: 'q', _id: target.itemDocId });
+  const isBlankElement = (i: number) =>
+    !refs.has(i) && /^\s*$/.test(proj.slice(at[i], at[i] + widthOf(i)));
+
+  type Edit =
+    | { kind: 'insertBefore'; index: number; elements: unknown[] }
+    | { kind: 'appendInside'; command: ProjectedCommand; elements: unknown[] }
+    | { kind: 'prependInside'; command: ProjectedCommand; elements: unknown[] }
+    | { kind: 'replaceRange'; from: number; to: number; elements: unknown[] };
+  const edits: Edit[] = [];
+  const moved = new Set<number>();
+
+  // ---- pins already inside a command: ONE reference per paper, before that paper's first pin -----
+  // Grouped by paper so the same work pinned twice gets a single citekey with both pins beside it.
+  const insideByHost = new Map<ProjectedCommand, Map<string, number[]>>();
+  for (const index of citePins) {
+    const host = hostOf(index);
+    // A non-plain argument (`\cite{\textbf{x}⟨pin⟩}`) is something else entirely — splicing a key
+    // into it would change what the author wrote. Leave the rem's pin where it is.
+    if (!host || !host.plainArg) continue;
+    const key = refs.get(index)!.target!.key;
+    const byKey = insideByHost.get(host) ?? new Map<string, number[]>();
+    byKey.set(key, [...(byKey.get(key) ?? []), index]);
+    insideByHost.set(host, byKey);
+  }
+  for (const [host, byKey] of insideByHost) {
+    for (const [key, indices] of byKey) {
+      // Already converted when the argument names this work as TEXT or as a REFERENCE. Other pins
+      // of the same paper do not count — they are what we are naming.
+      const named =
+        host.keys.includes(key) ||
+        indicesInside(host).some((i) => !refs.get(i)!.isPin && refs.get(i)?.target?.key === key);
+      if (named) continue;
+      const first = indices[0];
+      // `\supercite{⟨pin⟩}` takes no leading comma, but anything already inside the braces does —
+      // typed text (`\cite{other2000⟨pin⟩}`) or an earlier pin/reference, which would otherwise run
+      // the two citekeys together as `\cite{smith2020⟨pin⟩jones2019⟨pin⟩}`.
+      const beforeText = proj.slice(host.argOpen + 1, projOf(first)).split(PIN_SENTINEL).join('');
+      const anythingBefore =
+        !/^\s*$/.test(beforeText) || indicesInside(host).some((i) => projOf(i) < projOf(first));
+      // ...unless the author already typed the separator, which would give `\cite{a📌, , b📌}`.
+      const separated = /,\s*$/.test(beforeText);
+      const lead = anythingBefore && !separated ? [', '] : [];
+      edits.push({
+        kind: 'insertBefore',
+        index: first,
+        elements: [...lead, refElement(refs.get(first)!.target!)],
+      });
+    }
+  }
+
+  // ---- free pins group into whitespace-transparent runs and move INSIDE a command ---------------
+  const free = citePins.filter((index) => !hostOf(index));
+  type Run = { indices: number[] };
+  const runs: Run[] = [];
+  for (const index of free) {
+    const last = runs[runs.length - 1];
+    const previous = last && last.indices[last.indices.length - 1];
+    const contiguous =
+      previous !== undefined &&
+      text.slice(previous + 1, index).every((_, k) => {
+        const idx = previous + 1 + k;
+        return refs.has(idx) ? false : isBlankElement(idx);
+      });
+    if (contiguous) last.indices.push(index);
+    else runs.push({ indices: [index] });
+  }
+
+  for (const run of runs) {
+    const first = run.indices[0];
+    const last = run.indices[run.indices.length - 1];
+    const gapBlank = (from: number, to: number) =>
+      from >= to || /^\s*$/.test(proj.slice(from, to).split(PIN_SENTINEL).join(''));
+    // A command with `[...]` options is not a candidate: absorbing the pin would stretch its
+    // prenote/postnote over a work the author never applied it to. The pin gets its own \cite{}.
+    const canAbsorb = (c: ProjectedCommand) => c.plainArg && !c.hasOptions;
+    const before = [...commands]
+      .reverse()
+      .find((c) => c.argClose < projOf(first) && gapBlank(c.argClose + 1, projOf(first)) && canAbsorb(c));
+    const after = commands.find(
+      (c) => c.start > projOf(last) && gapBlank(projOf(last) + widthOf(last), c.start) && canAbsorb(c)
+    );
+    const anchor = before ?? after;
+    // A run that sits BEFORE its command keeps its place in the key list.
+    const prepend = !before && !!after;
+
+    // One reference per PAPER, carrying every pin of that paper — so a work pinned twice shows one
+    // citekey with both pins beside it, while different works stay visually separated.
+    const byKey = new Map<string, number[]>();
+    for (const i of run.indices) {
+      const key = refs.get(i)!.target!.key;
+      byKey.set(key, [...(byKey.get(key) ?? []), i]);
+    }
+    const groups = [...byKey.values()];
+
+    if (anchor) {
+      // A paper the command already names by reference: the pin joins that reference rather than
+      // creating a second citekey for the same work.
+      const refFor = new Map<string, number>();
+      for (const i of indicesInside(anchor)) {
+        const r = refs.get(i)!;
+        if (!r.isPin && r.target && !refFor.has(r.target.key)) refFor.set(r.target.key, i);
+      }
+      const wanted: number[] = [];
+      for (const i of run.indices) {
+        const key = refs.get(i)!.target!.key;
+        const host = refFor.get(key);
+        if (host !== undefined) {
+          edits.push({ kind: 'insertBefore', index: host + 1, elements: [text[i]] });
+          moved.add(i);
+          continue;
+        }
+        if (anchor.keys.includes(key)) continue; // named as plain text; leave the pin where it is
+        wanted.push(i);
+      }
+      if (wanted.length > 0) {
+        const wantedByKey = new Map<string, number[]>();
+        for (const i of wanted) {
+          const key = refs.get(i)!.target!.key;
+          wantedByKey.set(key, [...(wantedByKey.get(key) ?? []), i]);
+        }
+        const elements: unknown[] = [];
+        for (const indices of wantedByKey.values()) {
+          const block = [refElement(refs.get(indices[0])!.target!), ...indices.map((i) => text[i])];
+          if (prepend) elements.push(...block, ', ');
+          else elements.push(', ', ...block);
+        }
+        edits.push({ kind: prepend ? 'prependInside' : 'appendInside', command: anchor, elements });
+        for (const i of wanted) moved.add(i);
+      }
+      continue;
+    }
+
+    const elements: unknown[] = ['\\cite{'];
+    groups.forEach((indices, i) => {
+      if (i > 0) elements.push(', ');
+      elements.push(refElement(refs.get(indices[0])!.target!));
+      for (const index of indices) elements.push(text[index]);
+    });
+    elements.push('}');
+    // The run (pins and the whitespace between them) is replaced by the new command.
+    edits.push({ kind: 'replaceRange', from: first, to: last, elements });
+  }
+
+  if (edits.length === 0) return undefined;
+  return applyRichTextEdits(text, edits, moved, at, proj);
+}
+
+/** Slice a text element's text, keeping its formatting. A bare string stays a bare string. */
+function sliceTextElement(element: unknown, from: number, to?: number): unknown {
+  if (typeof element === 'string') return element.slice(from, to);
+  const entry = element as Record<string, unknown>;
+  return { ...entry, text: String(entry.text ?? '').slice(from, to) };
+}
+
+function elementIsEmptyText(element: unknown): boolean {
+  if (typeof element === 'string') return element.length === 0;
+  const entry = (element ?? {}) as Record<string, unknown>;
+  return (entry.i === 'm' || entry.i === undefined) && entry.text === '';
+}
+
+/**
+ * Build the new array from the planned edits. Every element not touched by an edit is pushed
+ * BY REFERENCE — including each relocated pin, which is moved, never rebuilt. Only the element whose
+ * text is split around a closing brace is cloned (keeping its formatting), plus the inserted strings
+ * and reference elements.
+ */
+function applyRichTextEdits(
+  text: unknown[],
+  edits: Array<
+    | { kind: 'insertBefore'; index: number; elements: unknown[] }
+    | { kind: 'appendInside'; command: ProjectedCommand; elements: unknown[] }
+    | { kind: 'prependInside'; command: ProjectedCommand; elements: unknown[] }
+    | { kind: 'replaceRange'; from: number; to: number; elements: unknown[] }
+  >,
+  moved: Set<number>,
+  at: number[],
+  proj: string
+): unknown[] {
+  const widthOf = (i: number) => (at[i + 1] ?? proj.length) - at[i];
+
+  // Every insertion is a PROJECTION OFFSET, never an element index: two different commands can own
+  // braces inside one text element (`\cite{a}` + a pin on each side), and keying by element index
+  // made the second insertion overwrite the first one's offset — one key fused onto another and the
+  // other duplicated. `order` breaks ties at the same offset so a prepend lands before anything
+  // else written at the same point.
+  const ORDER = { prependInside: 0, insertBefore: 1, appendInside: 2 } as const;
+  const insertions: Array<{ at: number; order: number; seq: number; elements: unknown[] }> = [];
+  const ranges: Array<{ from: number; to: number; elements: unknown[] }> = [];
+  edits.forEach((edit, seq) => {
+    if (edit.kind === 'replaceRange') {
+      ranges.push(edit);
+      return;
+    }
+    const point =
+      edit.kind === 'insertBefore'
+        ? at[edit.index] ?? proj.length
+        : edit.kind === 'prependInside'
+        ? edit.command.argOpen + 1
+        : edit.command.argClose;
+    insertions.push({ at: point, order: ORDER[edit.kind], seq, elements: edit.elements });
+  });
+  insertions.sort((a, b) => a.at - b.at || a.order - b.order || a.seq - b.seq);
+
+  let next = 0; // insertions are consumed in offset order as the walk advances
+  const out: unknown[] = [];
+
+  for (let i = 0; i < text.length; i += 1) {
+    const range = ranges.find((r) => r.from === i);
+    if (range) {
+      // A replaced span swallows its own offsets, so drop any insertion inside it.
+      const spanEnd = at[range.to] + widthOf(range.to);
+      while (next < insertions.length && insertions[next].at < spanEnd) next += 1;
+      out.push(...range.elements);
+      i = range.to;
+      continue;
+    }
+    if (ranges.some((r) => i > r.from && i <= r.to)) continue;
+
+    const begin = at[i];
+    const finish = begin + widthOf(i);
+    const entry = (text[i] ?? {}) as Record<string, unknown>;
+    const isText = typeof text[i] === 'string' || entry.i === 'm' || entry.i === undefined;
+
+    // Insertions landing at this element's start come first, whatever the element is.
+    while (next < insertions.length && insertions[next].at <= begin) {
+      out.push(...insertions[next].elements);
+      next += 1;
+    }
+
+    if (moved.has(i)) continue; // the pin travelled into a command's braces
+
+    // Only a TEXT element can be cut. Landing inside a reference or a pin would mean cloning it, so
+    // those insertions are emitted in front of the element instead.
+    if (!isText) {
+      out.push(text[i]);
+      while (next < insertions.length && insertions[next].at < finish) {
+        out.push(...insertions[next].elements);
+        next += 1;
+      }
+      continue;
+    }
+
+    // Cut this text element at every offset an insertion asks for, in order.
+    let cut = 0;
+    while (next < insertions.length && insertions[next].at < finish) {
+      const offset = insertions[next].at - begin;
+      const head = sliceTextElement(text[i], cut, offset);
+      if (!elementIsEmptyText(head)) out.push(head);
+      // Several insertions can share one offset (a prepend and an append on the same brace).
+      const here = insertions[next].at;
+      while (next < insertions.length && insertions[next].at === here) {
+        out.push(...insertions[next].elements);
+        next += 1;
+      }
+      cut = offset;
+    }
+    const tail = cut === 0 ? text[i] : sliceTextElement(text[i], cut);
+    if (cut === 0 || !elementIsEmptyText(tail)) out.push(tail);
+  }
+
+  // Anything addressed past the last element (an insertBefore at text.length).
+  while (next < insertions.length) {
+    out.push(...insertions[next].elements);
+    next += 1;
+  }
+  return out;
+}
+
+
 async function getOrCreateRem2TexRoot(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   parent: Rem
 ): Promise<Rem> {
   const children = await parent.getChildrenRem();
@@ -3185,7 +3775,7 @@ const LOG_REM_TITLE = 'Log';
 
 /** A titled rem under `parent` holding one code-block child (`Paper` → latex, `Log` → text). */
 async function createTitledCodeBlockRem(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   parent: Rem,
   title: string,
   code: string,
@@ -3212,7 +3802,7 @@ async function createTitledCodeBlockRem(
  * with a `text` code block child — titled rems so the two are told apart at a glance.
  */
 async function createOutputRem(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   parent: Rem,
   latex: string | undefined,
   logText: string,
@@ -3235,13 +3825,274 @@ async function createOutputRem(
   return outputTitle;
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * Planning and applying the pin -> citekey rewrite across a tree of rems.
+ *
+ * Planning never writes. It walks exactly the rems the export will read as prose — mirroring
+ * `serializeNode`'s guard order — and returns one row per rem that would change, each carrying the
+ * before/after arrays so the popup can show a diff and the apply step can verify nothing moved
+ * underneath it.
+ * ---------------------------------------------------------------------------------------------- */
+
+/** Titles that are load-bearing structure: renaming one breaks the export or Remzot's sync. */
+const REWRITE_FORBIDDEN_TITLES = new Set([
+  REQUIRED_PREAMBLE_NAME,
+  REQUIRED_END_NAME,
+  'Rem2Tex',
+  REM2TEX_IGNORE_TAG,
+  ZOTERO_ROOT_TITLE,
+  ZOTERO_ITEMS_TITLE,
+]);
+
+/** One rem the rewrite would change. */
+export type Rem2TexPinRow = {
+  remId: string;
+  title: string;
+  path: string;
+  /** Citekeys that would be written into this rem. */
+  keys: string[];
+  before: unknown[];
+  after: unknown[];
+  /** Readable one-liners for the popup, pins shown as ⟨pin⟩ and written keys inline. */
+  previewBefore: string;
+  previewAfter: string;
+};
+
+export type Rem2TexPinPlan = {
+  rows: Rem2TexPinRow[];
+  /** Distinct works named across the whole plan. */
+  keys: string[];
+  /** Rems looked at. Diagnostic only — the popup branches on `rows.length`, not on this. */
+  scanned: number;
+};
+
+/** The `Zotero/Items` doc a reference points at, with its citekey — or undefined if not a citation. */
+async function resolveCiteTarget(
+  plugin: RNPlugin,
+  remId: string,
+  context: Rem2TexConversionContext
+): Promise<Rem2TexCiteTarget | undefined> {
+  // A reference into the exported tree itself is never a citation (same rule as the flattener).
+  if (context.hierarchyRemIds.has(remId)) return undefined;
+  const linked = await plugin.rem.findOne(remId);
+  if (!linked) return undefined;
+  const itemDoc = await findZoteroItemDoc(plugin, linked);
+  if (!itemDoc) return undefined;
+  const key = flattenRawTitleText(itemDoc.text).trim();
+  // Never write a key the exporter would not emit, nor a `rem_<id>` placeholder.
+  const citation = toLatexCitation(key);
+  const match = citation.match(/^\\cite\{(.+)\}$/);
+  if (!match) return undefined;
+  return { itemDocId: itemDoc._id, key: match[1] };
+}
+
+/** A rem whose text must never be rewritten, whatever it contains. */
+async function isRewriteForbidden(
+  plugin: RNPlugin,
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<boolean> {
+  if (isRem2TexOutputRem(rem)) return true;
+  if (context.skipRemSubtreeIds?.has(rem._id)) return true;
+  // The raw-set test, not `isIgnoredRem` — that one logs as a side effect.
+  if (context.ignoredRemIds?.has(rem._id) === true) return true;
+  if (REWRITE_FORBIDDEN_TITLES.has(flattenRawTitleText(rem.text).trim())) return true;
+  if (await isBookkeepingRem(rem)) return true;
+  // Anything inside the Zotero tree: rewriting an item doc would change that work's citekey
+  // library-wide and fight Remzot's sync.
+  if (await findZoteroItemDoc(plugin, rem)) return true;
+  return false;
+}
+
+/** A readable one-line preview: pins as ⟨pin⟩, references as their target's key. */
+function previewRichText(text: unknown[], keyOf: (remId: string) => string | undefined): string {
+  return text
+    .map((e) => {
+      if (typeof e === 'string') return e;
+      const entry = (e ?? {}) as Record<string, unknown>;
+      if (entry.i === 'q' && typeof entry._id === 'string') {
+        return entry.pin === true ? '⟨pin⟩' : keyOf(entry._id) ?? '⟨ref⟩';
+      }
+      if (entry.i === 'x' && typeof entry.text === 'string') return `$${entry.text}$`;
+      if (entry.i === 'i') return '⟨image⟩';
+      return typeof entry.text === 'string' ? entry.text : '';
+    })
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Plan the rewrite over `roots` and everything under them. Writes nothing.
+ * The walk is recursive through `getChildrenRem` (not `getDescendants`) so a skipped rem takes its
+ * subtree with it, exactly as the exporter does.
+ */
+export async function planCitekeyRewrite(
+  plugin: RNPlugin,
+  roots: Rem[],
+  context: Rem2TexConversionContext
+): Promise<Rem2TexPinPlan> {
+  const rows: Rem2TexPinRow[] = [];
+  const keys: string[] = [];
+  let scanned = 0;
+
+  const visit = async (rem: Rem, path: string[]): Promise<void> => {
+    scanned += 1;
+    if (await isRewriteForbidden(plugin, rem, context)) return;
+
+    // An image rem's own text is never exported and its children are figure/table code blocks.
+    if (hasImageTokenInRichText(rem.text) || hasImageTokenInRichText(rem.backText)) return;
+
+    const text = rem.text;
+    if (Array.isArray(text) && text.length > 0) {
+      const targets = new Map<string, Rem2TexCiteTarget | undefined>();
+      for (const element of text) {
+        const entry = (element ?? {}) as Record<string, unknown>;
+        if (entry.i !== 'q' || typeof entry._id !== 'string') continue;
+        if (!targets.has(entry._id)) targets.set(entry._id, await resolveCiteTarget(plugin, entry._id, context));
+      }
+      const after = rewriteRichTextWithCitekeys(text, (id) => targets.get(id));
+      if (after) {
+        const keyOf = (id: string) => targets.get(id)?.key;
+        const written: string[] = [];
+        for (const t of targets.values()) if (t && !written.includes(t.key)) written.push(t.key);
+        for (const key of written) if (!keys.includes(key)) keys.push(key);
+        const title = (flattenRawTitleText(text).replace(/\s+/g, ' ').trim() || '(untitled)').slice(0, 80);
+        rows.push({
+          remId: rem._id,
+          title,
+          path: path.join(' › '),
+          keys: written,
+          before: text,
+          after,
+          previewBefore: previewRichText(text, keyOf),
+          previewAfter: previewRichText(after, keyOf),
+        });
+      }
+    }
+
+    const label = (flattenRawTitleText(rem.text).replace(/\s+/g, ' ').trim() || '…').slice(0, 40);
+    for (const child of await rem.getChildrenRem()) await visit(child, [...path, label]);
+  };
+
+  for (const root of roots) await visit(root, []);
+  return { rows, keys, scanned };
+}
+
+export type Rem2TexPinApplyResult = {
+  applied: Rem2TexPinRow[];
+  /** Changed underneath us since the preview, so the newer edit is never clobbered. */
+  skipped: Array<{ row: Rem2TexPinRow; reason: string }>;
+  failed: Array<{ row: Rem2TexPinRow; error: string }>;
+};
+
+const SET_TEXT_TIMEOUT_MS = 6000;
+const SET_TEXT_TRIES = 4;
+/** Hand the host a macrotask between writes, so a long apply cannot starve the popup frame. */
+const yieldToHost = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Apply the plan, one `setText` per rem.
+ *
+ * Every write races a timeout: the SDK's `setText` is documented in this project to occasionally
+ * stall FOREVER, and a stall does not throw — a timeout race is the only way to see it. A rem that
+ * fails is recorded and the rest continue, because a half-applied rewrite is only cosmetically
+ * inconsistent: an un-rewritten rem still exports the same LaTeX from its untouched pin.
+ */
+export async function applyCitekeyRewrite(
+  plugin: RNPlugin,
+  rows: Rem2TexPinRow[],
+  onProgress?: (done: number, total: number) => void
+): Promise<Rem2TexPinApplyResult> {
+  const result: Rem2TexPinApplyResult = { applied: [], skipped: [], failed: [] };
+
+  for (const [index, row] of rows.entries()) {
+    const rem = await plugin.rem.findOne(row.remId);
+    if (!rem) {
+      result.skipped.push({ row, reason: 'the rem no longer exists' });
+      onProgress?.(index + 1, rows.length);
+      continue;
+    }
+    // `setText` replaces the whole array, so a stale plan would destroy an edit made since the
+    // preview. Compare against the snapshot and skip anything that moved.
+    if (JSON.stringify(rem.text ?? []) !== JSON.stringify(row.before)) {
+      result.skipped.push({ row, reason: 'edited since the preview' });
+      onProgress?.(index + 1, rows.length);
+      continue;
+    }
+
+    let lastError = '';
+    let written = false;
+    for (let attempt = 0; attempt < SET_TEXT_TRIES && !written; attempt += 1) {
+      try {
+        await Promise.race([
+          rem.setText(row.after as never),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`setText timed out after ${SET_TEXT_TIMEOUT_MS} ms`)), SET_TEXT_TIMEOUT_MS)
+          ),
+        ]);
+        written = true;
+      } catch (error) {
+        lastError = normalizeUnknownError(error);
+        // A stalled write sometimes lands anyway; re-read before trying again.
+        const fresh = await plugin.rem.findOne(row.remId);
+        if (fresh && JSON.stringify(fresh.text ?? []) === JSON.stringify(row.after)) written = true;
+        else await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+    }
+
+    if (written) result.applied.push(row);
+    else result.failed.push({ row, error: lastError || 'setText did not complete' });
+    onProgress?.(index + 1, rows.length);
+    await yieldToHost();
+  }
+
+  return result;
+}
+
+const REWRITE_RECORD_TITLE_PREFIX = 'Rem2Tex rewrite';
+
+/**
+ * Record the before/after of everything written, under the paper's `Rem2Tex` folder, so a rewrite is
+ * never unrecoverable. (mo, 2026-10-08: record only — no undo command.)
+ */
+export async function writeCitekeyRewriteRecord(
+  plugin: RNPlugin,
+  parent: Rem,
+  applied: Rem2TexPinRow[],
+  startedAt: Date
+): Promise<string | undefined> {
+  if (applied.length === 0) return undefined;
+  const title = `${REWRITE_RECORD_TITLE_PREFIX} ${toOutputTimestamp(startedAt)}`;
+  const payload = JSON.stringify(
+    applied.map((row) => ({ remId: row.remId, title: row.title, path: row.path, before: row.before, after: row.after })),
+    null,
+    1
+  );
+  try {
+    const folder = await getOrCreateRem2TexRoot(plugin, parent);
+    const record = await plugin.rem.createRem();
+    if (!record) return undefined;
+    await record.setText([title]);
+    await record.setParent(folder, (await folder.getChildrenRem()).length);
+    const code = await plugin.rem.createRem();
+    if (!code) return title;
+    await code.setParent(record);
+    await code.setText(await plugin.richText.code(payload, LOG_CODE_LANGUAGE).value());
+    return title;
+  } catch {
+    // The record is a safety net, not the feature: never fail an export because it could not be written.
+    return undefined;
+  }
+}
+
 function describeTodoMode(mode: Rem2TexTodoExportMode): string {
   if (mode === 'none') return 'todos are not exported (a skipped todo takes its whole subtree with it)';
   if (mode === 'unfinished') return 'only unfinished todos are exported as % TODO comments';
   return 'all todos are exported as % TODO comments';
 }
 
-async function titlesForLog(plugin: ReactRNPlugin, rems: Rem[], context: Rem2TexConversionContext): Promise<string> {
+async function titlesForLog(plugin: RNPlugin, rems: Rem[], context: Rem2TexConversionContext): Promise<string> {
   const MAX = 12;
   const LABEL_MAX = 120;
   const titles: string[] = [];
@@ -3262,7 +4113,7 @@ async function titlesForLog(plugin: ReactRNPlugin, rems: Rem[], context: Rem2Tex
  * export rem is written with only that Log; the result says which happened.
  */
 export async function runRem2TexConversion(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   options?: Rem2TexRunOptions
 ): Promise<Rem2TexRunResult> {
   const log = new Rem2TexLog();
@@ -3395,7 +4246,7 @@ export async function runRem2TexConversion(
  * child) under the source rem; prior `Rem2Tex paragraph …` exports are not re-included in output.
  */
 export async function runParagraphToTexConversion(
-  plugin: ReactRNPlugin,
+  plugin: RNPlugin,
   options?: Rem2TexParagraphRunOptions
 ): Promise<string> {
   try {
@@ -3445,4 +4296,270 @@ export async function runParagraphToTexConversion(
     }
     throw new Error(normalizeUnknownError(error));
   }
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * One entry point per phase, shared by the commands and the preview popup.
+ *
+ * `previewRem2TexConvert` writes NOTHING: it resolves the target, plans the pin rewrite and runs the
+ * serialization once to collect warnings, so the popup can show what would change and what is wrong
+ * before anything is committed. `runRem2TexConvert` then applies the pins (if asked) and delegates to
+ * the existing export, which re-reads every rem — so what the export serialises is what the author
+ * now sees in Remnote.
+ * ---------------------------------------------------------------------------------------------- */
+
+export type Rem2TexConvertKind = 'paper' | 'paragraph' | 'selection';
+
+/** Session-storage key the command writes just before opening the conversion popup. */
+export const REM2TEX_CONVERT_REQUEST_KEY = 'rem2tex-convert-request';
+/** Widget file name — must match `src/widgets/rem2tex_convert.tsx`. */
+export const REM2TEX_CONVERT_WIDGET = 'rem2tex_convert';
+export type Rem2TexConvertRequest = { kind: Rem2TexConvertKind; selectedRemIds?: string[] };
+
+export type Rem2TexConvertIssue = {
+  severity: 'error' | 'warning';
+  message: string;
+};
+
+export type Rem2TexConvertPreview = {
+  kind: Rem2TexConvertKind;
+  /** What the export is about to run on, for the popup header. */
+  targetTitle: string;
+  todoExportMode: Rem2TexTodoExportMode;
+  pinRows: Rem2TexPinRow[];
+  /** Distinct works whose citekeys would be written. */
+  pinKeys: string[];
+  issues: Rem2TexConvertIssue[];
+  /** True when the export cannot start at all — the popup shows the reason and offers no Convert. */
+  blocked: boolean;
+};
+
+export type Rem2TexConvertOptions = {
+  kind: Rem2TexConvertKind;
+  todoExportMode?: Rem2TexTodoExportMode;
+  /** Ids from the editor selection (the selection command); omitted elsewhere. */
+  selectedRemIds?: string[];
+};
+
+/** Roots the export will walk, plus the context it will use. Throws the same typed errors it does. */
+async function resolveConvertScope(
+  plugin: RNPlugin,
+  options: Rem2TexConvertOptions,
+  log: Rem2TexLog
+): Promise<{ roots: Rem[]; context: Rem2TexConversionContext; targetTitle: string; outputParent: Rem }> {
+  const todoExportMode = options.todoExportMode ?? 'all';
+  const ignoredRemIds = await loadIgnoredRemIds(plugin);
+
+  if (options.kind === 'paper') {
+    const focused = await getFocusedParentRem(plugin);
+    const { paperRem, layout } = await resolvePaperRoot(plugin, focused);
+    const descendants = await paperRem.getDescendants();
+    return {
+      roots: layout.bodyRems,
+      context: {
+        hierarchyRemIds: new Set([paperRem._id, ...descendants.map((r) => r._id)]),
+        rootRemId: paperRem._id,
+        todoExportMode,
+        log,
+        ignoredRemIds,
+      },
+      targetTitle: (await getRemTitle(plugin, paperRem)).trim() || '(untitled)',
+      outputParent: paperRem,
+    };
+  }
+
+  if (options.kind === 'paragraph') {
+    const target = await getFocusedParentRem(plugin);
+    const descendants = await target.getDescendants();
+    return {
+      roots: [target],
+      context: {
+        hierarchyRemIds: new Set([target._id, ...descendants.map((r) => r._id)]),
+        rootRemId: target._id,
+        todoExportMode: 'all',
+        skipRemSubtreeIds: await collectParagraphExportSkipRemIds(target),
+        log,
+        ignoredRemIds,
+      },
+      targetTitle: (await getRemTitle(plugin, target)).trim() || '(untitled)',
+      outputParent: target,
+    };
+  }
+
+  const selected = await resolveSelectionRems(plugin, options.selectedRemIds);
+  const anchors = await normalizeSelectionRems(plugin, selected);
+  if (anchors.length === 0) {
+    throw new Rem2TexConversionError({
+      code: 'NOTHING_TO_EXPORT',
+      headline: 'Nothing to export',
+      whatHappened: 'No rem was selected or focused.',
+      hints: ['Select one or more rems (or click into one), then run the command again.'],
+    });
+  }
+  const hierarchyRemIds = new Set<string>();
+  const skipRemSubtreeIds = new Set<string>();
+  for (const anchor of anchors) {
+    hierarchyRemIds.add(anchor._id);
+    for (const d of await anchor.getDescendants()) hierarchyRemIds.add(d._id);
+    for (const id of await collectParagraphExportSkipRemIds(anchor)) skipRemSubtreeIds.add(id);
+  }
+  const titles = await Promise.all(anchors.slice(0, 3).map(async (a) => (await getRemTitle(plugin, a)).trim() || '(untitled)'));
+  return {
+    roots: anchors,
+    context: { hierarchyRemIds, rootRemId: anchors[0]._id, todoExportMode: 'all', skipRemSubtreeIds, log, ignoredRemIds },
+    targetTitle: anchors.length === 1 ? titles[0] : `${anchors.length} rems (${titles.join(', ')}${anchors.length > 3 ? ', …' : ''})`,
+    outputParent: anchors[0],
+  };
+}
+
+/** Plan everything, write nothing. Safe to call from a command before deciding whether to show UI. */
+export async function previewRem2TexConvert(
+  plugin: RNPlugin,
+  options: Rem2TexConvertOptions
+): Promise<Rem2TexConvertPreview> {
+  const todoExportMode = options.todoExportMode ?? 'all';
+  const log = new Rem2TexLog();
+  const issues: Rem2TexConvertIssue[] = [];
+  const empty: Rem2TexConvertPreview = {
+    kind: options.kind,
+    targetTitle: '',
+    todoExportMode,
+    pinRows: [],
+    pinKeys: [],
+    issues,
+    blocked: true,
+  };
+
+  let scope;
+  try {
+    scope = await resolveConvertScope(plugin, options, log);
+  } catch (error) {
+    issues.push({ severity: 'error', message: describeConvertError(error) });
+    return empty;
+  }
+
+  // Serialize once to surface the warnings the exporter would record (an image rem with no figure
+  // block, a skipped todo taking prose with it, plain text dropped under a boundary rem).
+  try {
+    if (options.kind === 'paper') {
+      const focused = await getFocusedParentRem(plugin);
+      const { layout } = await resolvePaperRoot(plugin, focused);
+      await getBoundaryBlock(plugin, layout.preambleRem, REQUIRED_PREAMBLE_NAME, scope.context);
+      await getBoundaryBlock(plugin, layout.endRem, REQUIRED_END_NAME, scope.context);
+    }
+    const lines: string[] = [];
+    for (const root of scope.roots) await serializeNode(plugin, root, 0, lines, scope.context, undefined, undefined);
+    if (lines.join('\n').trim().length === 0) {
+      issues.push({ severity: 'error', message: 'Nothing to export — this produced no LaTeX at all.' });
+    }
+  } catch (error) {
+    issues.push({ severity: 'error', message: describeConvertError(error) });
+  }
+  for (const warning of log.warnings) issues.push({ severity: 'warning', message: warning });
+
+  const plan = await planCitekeyRewrite(plugin, scope.roots, scope.context);
+  return {
+    kind: options.kind,
+    targetTitle: scope.targetTitle,
+    todoExportMode,
+    pinRows: plan.rows,
+    pinKeys: plan.keys,
+    issues,
+    blocked: issues.some((i) => i.severity === 'error'),
+  };
+}
+
+/** One readable sentence for any error, typed or not. */
+export function describeConvertError(error: unknown): string {
+  if (isRem2TexConversionError(error)) {
+    const where = error.sourceRemTitle ? ` (at rem “${error.sourceRemTitle}”)` : '';
+    return `${error.headline}. ${error.whatHappened}${where}`;
+  }
+  return normalizeUnknownError(error);
+}
+
+export type Rem2TexConvertResult = {
+  kind: Rem2TexConvertKind;
+  outputTitle: string;
+  /**
+   * Whether the EXPORT succeeded. A failed paper conversion still writes an export rem (Log only),
+   * so `outputTitle` is set either way — without this the caller cannot tell the two apart and
+   * would report a failure as a success.
+   */
+  status: 'success' | 'failed';
+  errorCode?: string;
+  errorHeadline?: string;
+  /** Citekey rewrite outcome; all zero when the author declined it. */
+  pinsWritten: number;
+  pinsSkipped: number;
+  pinsFailed: number;
+  recordTitle?: string;
+  /** Paper exports only. */
+  warningCount: number;
+  citationCount?: number;
+  missingMetadataCount?: number;
+};
+
+/**
+ * Apply the citekey rewrite (when asked) and then run the export. The export re-reads every rem, so
+ * it serialises exactly what the author now sees — `setText` does not update the objects we hold.
+ */
+export async function runRem2TexConvert(
+  plugin: RNPlugin,
+  options: Rem2TexConvertOptions & { pinRows?: Rem2TexPinRow[] }
+): Promise<Rem2TexConvertResult> {
+  const startedAt = new Date();
+  let pinsWritten = 0;
+  let pinsSkipped = 0;
+  let pinsFailed = 0;
+  let recordTitle: string | undefined;
+
+  if (options.pinRows && options.pinRows.length > 0) {
+    const log = new Rem2TexLog();
+    const scope = await resolveConvertScope(plugin, options, log);
+    const applied = await applyCitekeyRewrite(plugin, options.pinRows);
+    pinsWritten = applied.applied.length;
+    pinsSkipped = applied.skipped.length;
+    pinsFailed = applied.failed.length;
+    recordTitle = await writeCitekeyRewriteRecord(plugin, scope.outputParent, applied.applied, startedAt);
+  }
+
+  if (options.kind === 'paper') {
+    const result = await runRem2TexConversion(plugin, {
+      todoExportMode: options.todoExportMode ?? 'all',
+      commandLabel: 'Convert Paper to TeX',
+    });
+    return {
+      kind: 'paper',
+      outputTitle: result.outputTitle,
+      status: result.status,
+      errorCode: result.errorCode,
+      errorHeadline: result.errorHeadline,
+      pinsWritten,
+      pinsSkipped,
+      pinsFailed,
+      recordTitle,
+      warningCount: result.warningCount,
+    };
+  }
+
+  if (options.kind === 'paragraph') {
+    const outputTitle = await runParagraphToTexConversion(plugin);
+    // This one throws on failure, so getting here IS the success case.
+    return { kind: 'paragraph', outputTitle, status: 'success', pinsWritten, pinsSkipped, pinsFailed, recordTitle, warningCount: 0 };
+  }
+
+  const result = await runSelectionToTexConversion(plugin, { selectedRemIds: options.selectedRemIds });
+  return {
+    kind: 'selection',
+    outputTitle: result.outputTitle,
+    status: 'success', // also throws on failure
+    pinsWritten,
+    pinsSkipped,
+    pinsFailed,
+    recordTitle,
+    warningCount: 0,
+    citationCount: result.citationCount,
+    missingMetadataCount: result.missingMetadataCount,
+  };
 }

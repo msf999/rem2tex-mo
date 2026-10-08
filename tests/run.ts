@@ -10,10 +10,12 @@ import * as layout from './layout.test';
 import * as regressions from './regressions.test';
 import * as ignore from './ignore.test';
 import * as bibliography from './bibliography.test';
+import * as citekeys from './citekeys.test';
+import * as convert from './convert.test';
 
 (async () => {
   let failures = 0;
-  for (const s of [pins, comments, layout, regressions, ignore, bibliography]) {
+  for (const s of [pins, comments, layout, regressions, ignore, bibliography, citekeys, convert]) {
     failures += await s.run();
   }
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);
