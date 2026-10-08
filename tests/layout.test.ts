@@ -1,5 +1,5 @@
 import { runRem2TexConversion, runParagraphToTexConversion, isRem2TexConversionError, REM2TEX_IGNORE_TAG } from '../src/lib/rem2tex';
-import { createFakeKb, code, heading, suite } from './fake-kb';
+import { createFakeKb, code, heading, pin, suite, todo } from './fake-kb';
 
 /** Paper layout (Preamble/End anchors, any child as starting point), the Paper/Log output shape, the Log text. */
 export async function run(): Promise<number> {
@@ -97,7 +97,7 @@ export async function run(): Promise<number> {
   mk('p6end1', [code('E')], 'p6end');
   captured.log = '';
   const res6 = await runRem2TexConversion(plugin, { parentRem: p6 });
-  t.check('image rem without media → success with 1 warning listed in the Log', res6.status === 'success' && res6.warningCount === 1 && /Warnings \(1\)/.test(captured.log) && /REM2TEX WARNING box was inserted/.test(captured.log), JSON.stringify(res6) + '\n' + captured.log);
+  t.check('image rem without media → success with 1 warning listed in the Log', res6.status === 'success' && res6.warningCount === 1 && /Warnings \(1\)/.test(captured.log) && /REM2TEX WARNING box went into the paper/.test(captured.log), JSON.stringify(res6) + '\n' + captured.log);
   // The box's own message must be escaped in ONE pass: chaining replaces used to mangle the
   // `\textbackslash{}` it inserted into `\textbackslash\{\}` (found in live testing, 2026-09-04).
   t.check('the REM2TEX WARNING box escapes its message without breaking \\textbackslash{}',
@@ -169,10 +169,17 @@ export async function run(): Promise<number> {
   t.equal('image children and the skipped todo are absent from the paper', captured.latex, 'P\n\n\\begin{figure}\\end{figure}\n\nE');
   t.check('three warnings: the image rem\'s own caption, its non-media child, and the skipped todo (Status/Size children ignored; todo-only subtree not warned)',
     res8.status === 'success' && res8.warningCount === 3
-      && /its own text was not exported.*"Figure 1: the setup"/.test(captured.log)
-      && /Image rem .*1 child rem\(s\) that are not figure\/table blocks were not exported.*"a caption typed as prose"/.test(captured.log)
-      && /Todo "finished todo" was skipped by the todo mode together with 1 non-todo descendant rem\(s\).*"prose under the finished todo"/.test(captured.log),
+      && /so this rem’s own text was left out/.test(captured.log)
+      && /so 1 other child rem\(s\) of this one were left out/.test(captured.log)
+      && /Skipped by the todo mode, which also removed 1 non-todo descendant rem\(s\)/.test(captured.log),
     JSON.stringify(res8) + '\n' + captured.log);
+  // Each warning puts its REASON on its own line and the quoted content underneath, rather than
+  // running them together (mo, 2026-10-09).
+  t.check('a warning separates its reason, its rem, its quotes and its path',
+    /- Only the figure\/table code blocks under an image rem are exported, so this rem’s own text was left out\.\n    rem:  Image rem "/.test(captured.log)
+      && /\n    left out:\n      · "a caption typed as prose"/.test(captured.log)
+      && /\n    rem:  Todo "finished todo"\n(    at:   [^\n]*\n)?    now missing from the paper:\n      · "prose under the finished todo"/.test(captured.log),
+    captured.log);
 
   // 9. a childless boundary rem is empty (item 6) — its title is not the block; back text still counts
   const p9 = mk('p9', ['Paper 9'], null);
@@ -247,8 +254,53 @@ export async function run(): Promise<number> {
   captured.log = '';
   const res12 = await runRem2TexConversion(plugin, { parentRem: p12 });
   t.check('empty-titled heading: no \\section, not counted, warned',
-    res12.status === 'success' && !captured.latex.includes('\\section') && /Headings: 0/.test(captured.log) && /Heading rem with no title/.test(captured.log) && captured.latex.includes('orphaned prose'),
+    res12.status === 'success' && !captured.latex.includes('\\section') && /Headings: 0/.test(captured.log) && /This heading rem has no title/.test(captured.log) && captured.latex.includes('orphaned prose'),
     JSON.stringify(res12) + '\n' + captured.latex + '\n' + captured.log);
+
+  // 13. a warning's parts are cleaned up and kept apart (mo, 2026-10-09: the one-sentence format
+  // buried the reason between the quoted titles and a very long path).
+  const p13 = mk('p13', ['Paper 13'], null);
+  mk('p13z', ['Zotero'], null);
+  mk('p13items', ['Items'], 'p13z');
+  mk('p13A', ['smith2020'], 'p13items');
+  mk('p13B', ['jones2019'], 'p13items');
+  mk('p13pre', ['Preamble'], 'p13');
+  mk('p13pre1', [code('P')], 'p13pre');
+  const p13sec = mk('p13sec', ['Introduction'], 'p13', heading);
+  // A very long prose ancestor: its path segment must be elided, not printed in full.
+  const p13long = mk('p13long',
+    ['Nitride semiconductors have emerged as a promising class of materials for energy-related applications such as photocatalysis.'],
+    'p13sec');
+  // A todo whose title cites TWO works by pin. The raw title ignores references, so the title used
+  // to keep an argument-less `\cite{, }` — artefact, not content.
+  const p13todo = mk('p13todo', ['Judy: relate this back \\cite{', pin('p13A'), pin('p13B'), '}'], p13long._id, todo);
+  // A search-portal child, which used to be quoted literally as "query:".
+  mk('p13q', ['query:'], p13todo._id);
+  mk('p13end', ['End'], 'p13');
+  mk('p13end1', [code('E')], 'p13end');
+  captured.latex = '';
+  captured.log = '';
+  const res13 = await runRem2TexConversion(plugin, { parentRem: p13, todoExportMode: 'none' });
+  const warn13 = captured.log.slice(captured.log.indexOf('Warnings ('));
+
+  t.check('a warning puts its reason on its own line, before everything else',
+    /- Skipped by the todo mode, which also removed 1 non-todo descendant rem\(s\) from the paper\.\n/.test(warn13),
+    warn13);
+  t.check('the rem, the quotes and the path each get their own labelled line',
+    /\n    rem:  Todo "/.test(warn13) && /\n    at:   /.test(warn13) && /\n    now missing from the paper:\n      · "/.test(warn13),
+    warn13);
+  t.check('an argument-less \\cite{} left by ignored references is stripped from the named rem',
+    !/\\cite\{[\s,]*\}/.test(warn13),
+    warn13);
+  t.check('a search-portal rem is not quoted as "query:"',
+    !/"query:"/.test(warn13) && /· "\(untitled\)"/.test(warn13),
+    warn13);
+  t.check('a long path segment is elided rather than printed in full',
+    /at:   Introduction > Nitride semiconductors have emerged as a …$/m.test(warn13),
+    warn13);
+  t.check('the path does not repeat the rem the warning already named',
+    !/at:   [^\n]*Judy: relate this back/.test(warn13),
+    warn13);
 
   return t.failures();
 }

@@ -190,23 +190,57 @@ function Rem2TexConvertPopup() {
             {errors.length > 0 ? ' — this cannot be exported until it is fixed' : ''}
           </span>
           {preview.issues.map((issue, index) => (
-            // Same rule as the pin rows, so a run of warnings reads as separate items.
-            <span
+            // The REASON is its own line; the rem, the quoted content and the path sit under it in
+            // calmer type. One flat sentence per warning buried the reason between a wall of quoted
+            // titles and a very long outline path (mo, 2026-10-09).
+            <div
               key={index}
-              className="text-sm"
+              className="text-sm flex flex-col"
               style={{
                 paddingLeft: '0.75rem',
                 marginLeft: '0.25rem',
+                marginTop: '0.25rem',
                 borderLeft: `2px solid ${BORDER}`,
                 overflowWrap: 'anywhere',
-                color: issue.severity === 'error'
-                  ? 'var(--rn-clr-content-negative, #dc2626)'
-                  : 'var(--rn-clr-content-warning, #b45309)',
               }}
             >
-              {issue.severity === 'error' ? '✕ ' : '⚠ '}
-              {issue.message}
-            </span>
+              <span
+                style={{
+                  color:
+                    issue.severity === 'error'
+                      ? 'var(--rn-clr-content-negative, #dc2626)'
+                      : 'var(--rn-clr-content-warning, #b45309)',
+                }}
+              >
+                {issue.severity === 'error' ? '✕ ' : '⚠ '}
+                {issue.message}
+              </span>
+
+              {issue.subject && (
+                <span className="text-xs rn-clr-content-secondary">{issue.subject}</span>
+              )}
+
+              {issue.quotes && issue.quotes.length > 0 && (
+                <>
+                  <span className="text-xs rn-clr-content-tertiary">
+                    {issue.quotesLabel ?? 'affected'}:
+                  </span>
+                  {issue.quotes.map((quote, q) => (
+                    <span
+                      key={q}
+                      className="text-xs font-mono rn-clr-content-secondary"
+                      style={{ paddingLeft: '0.75rem' }}
+                    >
+                      {quote}
+                    </span>
+                  ))}
+                </>
+              )}
+
+              {issue.path && (
+                <span className="text-xs rn-clr-content-tertiary">in {issue.path}</span>
+              )}
+            </div>
           ))}
         </div>
       )}

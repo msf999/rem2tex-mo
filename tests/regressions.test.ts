@@ -17,7 +17,7 @@ export async function run(): Promise<number> {
   const end = mk('end', ['End'], 'paper');
   mk('end1', [code('\\end{document}')], 'end');
   const resA = await runRem2TexConversion(plugin, { parentRem: paper });
-  t.check('(a) success with 1 warning about the dropped plain line', resA.status === 'success' && resA.warningCount === 1 && /Plain-text rem under Preamble/.test(captured.log), JSON.stringify(resA) + '\n' + captured.log);
+  t.check('(a) success with 1 warning about the dropped plain line', resA.status === 'success' && resA.warningCount === 1 && /A plain-text rem under Preamble was not exported/.test(captured.log), JSON.stringify(resA) + '\n' + captured.log);
   t.equal('(a) mixed boundary keeps code and surfaces the plain line as a % REM2TEX comment', captured.latex,
     ['\\usepackage{amsmath}', '\\begin{document}', '% REM2TEX: plain-text rem under Preamble not exported (code blocks take precedence): \\documentclass{article}', '', 'Hello \\& welcome', '', '\\end{document}'].join('\n'));
 

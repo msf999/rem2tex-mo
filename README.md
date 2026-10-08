@@ -238,9 +238,22 @@ toasts one line — exported, exported with *n* warnings, or failed, read the lo
 text: **Setup** (command, todo mode, paper rem) · **Structure** (where `Preamble` and `End` sit, which
 body rems were converted, what was ignored) · **Conversion** (block sizes, `\documentclass`, `\title`,
 `\author`) · **Conversion summary** (counts, citation keys, dropped pins, todo comments, skipped rems)
-· **Skipped by Rem2Tex-ignore** · **Warnings** (each naming the rem and its path) · **Result**
+· **Skipped by Rem2Tex-ignore** · **Warnings** · **Result**
 (`SUCCESS` with the line count, or the failure with what happened, the rem, its path and suggestions).
 Copy it into a bug report when asking for help.
+
+Each warning is laid out in parts rather than one long sentence — the reason first, then the rem it
+happened to, then whatever content was left out, then where that rem lives:
+
+```
+- Skipped by the todo mode, which also removed 1 non-todo descendant rem(s) from the paper.
+    rem:  Todo "Todo1"
+    at:   Introduction > Nitride semiconductors have emerged as a …
+    now missing from the paper:
+      · "indented below without todo."
+```
+
+The preview shows the same warnings the same way, at the top, before you export.
 
 Problems found before a paper is located are shown **in the preview**, at the top, rather than
 toasted: no focused rem, or the focused rem and its parent are both not papers — it says what is

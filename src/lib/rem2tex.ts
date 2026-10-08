@@ -117,9 +117,37 @@ const GENERIC_ERROR_HINTS = [
  * Human-readable record of one paper conversion. Written as a `text` code block next to the Paper
  * block under the export rem, so the outline itself is the audit trail (there is no popup).
  */
+/**
+ * One warning, with the REASON separated from the quoted content and the outline path.
+ *
+ * These used to be one flat sentence per warning, which put the reason in the middle of a wall of
+ * quoted titles and a long path (mo, 2026-10-09: *"can you make the warnings seperate the quoted
+ * text and the readon for the warning so it is easier to read?"*). Both renderers — the Log code
+ * block and the popup callout — lay the parts out themselves, so the split has to live here.
+ */
+export type Rem2TexWarning = {
+  /** Why this is a warning: one sentence, with no quoted content and no path in it. */
+  reason: string;
+  /** What it happened to, already quoted — e.g. `Todo "Todo1"`. */
+  subject?: string;
+  /** Outline path to that rem, each segment shortened for reading. */
+  path?: string;
+  /** A short label introducing `quotes` — e.g. `now missing from the paper`. */
+  quotesLabel?: string;
+  /** The quoted content itself: dropped rem titles, a dropped caption, a dropped line. */
+  quotes?: string[];
+};
+
+/** Longest a single outline-path segment may be in a warning before it is elided. */
+const WARNING_PATH_SEGMENT_MAX = 42;
+/** Longest a quoted excerpt may be in a warning. */
+const WARNING_QUOTE_MAX = 160;
+/** Longest the named rem may be — shorter than a quote, because it is a label, not content. */
+const WARNING_SUBJECT_MAX = 90;
+
 export class Rem2TexLog {
   readonly startedAt = new Date();
-  readonly warnings: string[] = [];
+  readonly warnings: Rem2TexWarning[] = [];
   readonly counts = {
     headings: 0,
     paragraphs: 0,
@@ -151,8 +179,8 @@ export class Rem2TexLog {
     this.sections[this.sections.length - 1].lines.push(line);
   }
 
-  warn(line: string): void {
-    this.warnings.push(line);
+  warn(warning: Rem2TexWarning): void {
+    this.warnings.push(warning);
   }
 
   citation(citeCommand: string): void {
@@ -195,7 +223,15 @@ export class Rem2TexLog {
     const warningsTitle = `Warnings (${this.warnings.length})`;
     out.push('', warningsTitle, '-'.repeat(warningsTitle.length));
     if (this.warnings.length === 0) out.push('- none');
-    for (const w of this.warnings) out.push(`- ${w}`);
+    for (const w of this.warnings) {
+      out.push(`- ${w.reason}`);
+      if (w.subject) out.push(`    rem:  ${w.subject}`);
+      if (w.path) out.push(`    at:   ${w.path}`);
+      if (w.quotes && w.quotes.length > 0) {
+        out.push(`    ${w.quotesLabel ?? 'affected'}:`);
+        for (const q of w.quotes) out.push(`      · ${q}`);
+      }
+    }
     out.push('', 'Result', '------');
     if (result.status === 'success') {
       out.push(
@@ -1375,9 +1411,12 @@ async function getBoundaryBlock(
     .trim();
   if (normalizedBlockText && droppedPlainLines.length > 0) {
     for (const line of droppedPlainLines) {
-      context.log?.warn(
-        `Plain-text rem under ${label} not exported because ${label} also has a code block (code takes precedence); it was appended as a % REM2TEX comment: ${line.slice(0, 120)}`
-      );
+      context.log?.warn({
+        reason: `A plain-text rem under ${label} was not exported, because ${label} also has a code block and code takes precedence. It was appended as a % REM2TEX comment instead.`,
+        subject: `${label} block`,
+        quotesLabel: 'not exported',
+        quotes: [`"${line.replace(/\s+/g, ' ').trim().slice(0, WARNING_QUOTE_MAX)}"`],
+      });
     }
     const notes = droppedPlainLines.map(
       (line) =>
@@ -1620,10 +1659,15 @@ function stripTodoCommentArtifactCitations(text: string): string {
  * written citekey.
  */
 function stripEmptyCitationCommands(text: string): string {
-  if (!text.includes('{}')) return text;
+  if (!text.includes('{')) return text;
   const names = [...CITATION_WRAPPER_COMMANDS, ...REFERENCE_WRAPPER_COMMANDS].join('|');
-  // `\cite`, `\cite*`, `\cite[p. 1]` … followed by an empty or whitespace-only argument.
-  return text.replace(new RegExp(`\\\\(?:${names})\\*?(?:\\[[^\\]]*\\])*\\{\\s*\\}`, 'g'), '').trim();
+  // An argument holding no KEYS: empty, whitespace, or nothing but separators. Two pins in one
+  // `\cite{}` leave `{, }` rather than `{}` once the references are ignored (seen in mo's real
+  // paper, 2026-10-09), so commas count as empty too.
+  return text
+    .replace(new RegExp(`\\\\(?:${names})\\*?(?:\\[[^\\]]*\\])*\\{[\\s,]*\\}`, 'g'), '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 async function getCommentTreeLabel(
@@ -2077,10 +2121,55 @@ async function safeHierarchyPath(
   }
 }
 
-function quoteTitles(rems: Rem[], max = 5): string {
-  const titles = rems.slice(0, max).map((r) => `"${flattenRawTitleText(r.text).trim() || '(untitled)'}"`);
+/**
+ * A rem's title as it should appear inside a warning: artefacts stripped, whitespace folded, elided.
+ *
+ * `flattenRawTitleText` ignores references, so a rem that cites only by pin or by written citekey
+ * leaves behind an argument-less citation — `\cite{}` for one work, `\cite{, }` for two. Both are
+ * noise in a warning, so the empty-citation strip runs here too.
+ */
+function displayTitleForWarning(rem: Rem, max = WARNING_QUOTE_MAX): string {
+  let title = flattenRawTitleText(rem.text);
+  title = sanitizeDiagnosticExcerpt(title);
+  title = stripTodoCommentArtifactCitations(title);
+  title = stripEmptyCitationCommands(title);
+  title = title.replace(/\s+/g, ' ').trim();
+  if (!title) return '(untitled)';
+  return title.length > max ? `${title.slice(0, max - 1)}…` : title;
+}
+
+/** Quoted titles as SEPARATE entries, for a warning's `quotes` list. */
+function quotedTitles(rems: Rem[], max = 5): string[] {
+  const titles = rems.slice(0, max).map((r) => `"${displayTitleForWarning(r)}"`);
   if (rems.length > max) titles.push(`… and ${rems.length - max} more`);
-  return titles.join(', ');
+  return titles;
+}
+
+/**
+ * Where a rem LIVES, for a warning: each segment elided so one long prose title cannot swamp the
+ * line, and the rem's own segment dropped — `getRelativeSourceRemHierarchy` ends with the rem
+ * itself, which the warning already names on its own line.
+ */
+function shortenPathForWarning(path: string | undefined, ownTitle?: string): string | undefined {
+  if (!path) return undefined;
+  let segments = path.split(' > ');
+  if (ownTitle !== undefined && segments.length > 0) {
+    const last = segments[segments.length - 1].replace(/\s+/g, ' ').trim();
+    const own = ownTitle.replace(/\s+/g, ' ').trim();
+    // Compare on the elided forms too: the path segment and the title are truncated differently.
+    if (last === own || (own.length > 0 && (last.startsWith(own.slice(0, 40)) || own.startsWith(last.slice(0, 40))))) {
+      segments = segments.slice(0, -1);
+    }
+  }
+  if (segments.length === 0) return undefined;
+  return segments
+    .map((segment) => {
+      const folded = segment.replace(/\s+/g, ' ').trim();
+      return folded.length > WARNING_PATH_SEGMENT_MAX
+        ? `${folded.slice(0, WARNING_PATH_SEGMENT_MAX - 1)}…`
+        : folded;
+    })
+    .join(' > ');
 }
 
 /** Count a todo skipped by the todo mode and warn when non-todo content vanishes with it. */
@@ -2100,16 +2189,20 @@ async function noteSkippedTodo(
     lost.push(descendant);
   }
   if (lost.length === 0) return;
-  const title = flattenRawTitleText(rem.text).trim() || '(untitled)';
+  const title = displayTitleForWarning(rem, WARNING_SUBJECT_MAX);
   let path: string | undefined;
   try {
     path = (await getRelativeSourceRemHierarchy(plugin, rem, context))?.join(' > ');
   } catch {
     path = undefined;
   }
-  log.warn(
-    `Todo "${title}"${path && path !== title ? ` (${path})` : ''} was skipped by the todo mode together with ${lost.length} non-todo descendant rem(s), now missing from the paper: ${quoteTitles(lost)}`
-  );
+  log.warn({
+    reason: `Skipped by the todo mode, which also removed ${lost.length} non-todo descendant rem(s) from the paper.`,
+    subject: `Todo "${title}"`,
+    path: shortenPathForWarning(path, title),
+    quotesLabel: 'now missing from the paper',
+    quotes: quotedTitles(lost),
+  });
 }
 
 function buildVisibleWarningBlock(message: string): string {
@@ -2188,18 +2281,33 @@ async function serializeNode(
       .replace(/\s+/g, ' ')
       .trim();
     if (context.log && (nonMediaChildren.length > 0 || ownCaption)) {
-      const imageTitle = flattenRawTitleText(rem.text).trim() || '(image rem)';
-      const path = await safeHierarchyPath(plugin, rem, context);
-      const where = `Image rem "${imageTitle}"${path && path !== imageTitle ? ` (${path})` : ''}`;
+      const imageTitle = displayTitleForWarning(rem, WARNING_SUBJECT_MAX);
+      const titled = imageTitle !== '(untitled)';
+      const subject = titled ? `Image rem "${imageTitle}"` : 'Image rem';
+      const where = shortenPathForWarning(
+        await safeHierarchyPath(plugin, rem, context),
+        titled ? imageTitle : undefined
+      );
       if (ownCaption) {
-        context.log.warn(
-          `${where}: its own text was not exported (only figure/table code blocks under an image rem are): "${ownCaption.length > 120 ? `${ownCaption.slice(0, 119)}…` : ownCaption}"`
-        );
+        const caption =
+          ownCaption.length > WARNING_QUOTE_MAX ? `${ownCaption.slice(0, WARNING_QUOTE_MAX - 1)}…` : ownCaption;
+        context.log.warn({
+          reason: 'Only the figure/table code blocks under an image rem are exported, so this rem’s own text was left out.',
+          subject,
+          path: where,
+          // No `quotes`: the caption IS the subject, and repeating it says nothing new.
+          quotesLabel: titled ? undefined : 'its text',
+          quotes: titled ? undefined : [`"${caption}"`],
+        });
       }
       if (nonMediaChildren.length > 0) {
-        context.log.warn(
-          `${where}: ${nonMediaChildren.length} child rem(s) that are not figure/table blocks were not exported (only figure/table code blocks under an image rem are): ${quoteTitles(nonMediaChildren)}`
-        );
+        context.log.warn({
+          reason: `Only the figure/table code blocks under an image rem are exported, so ${nonMediaChildren.length} other child rem(s) of this one were left out.`,
+          subject,
+          path: where,
+          quotesLabel: 'left out',
+          quotes: quotedTitles(nonMediaChildren),
+        });
       }
     }
     if (mediaBlocks.length === 0) {
@@ -2208,8 +2316,18 @@ async function serializeNode(
         ? `Image rem "${remTitle}" must include at least one child code block containing \\begin{figure} or \\begin{table}.`
         : 'Image rem must include at least one child code block containing \\begin{figure} or \\begin{table}.';
       if (context.log) {
-        const path = (await getRelativeSourceRemHierarchy(plugin, rem, context))?.join(' > ');
-        context.log.warn(`${warningText} A REM2TEX WARNING box was inserted instead.${path ? ` (at: ${path})` : ''}`);
+        const title = displayTitleForWarning(rem, WARNING_SUBJECT_MAX);
+        const named = remTitle && title !== '(untitled)';
+        context.log.warn({
+          reason:
+            'An image rem needs a child code block containing \\begin{figure} or \\begin{table}. ' +
+            'This one has none, so a visible REM2TEX WARNING box went into the paper instead.',
+          subject: named ? `Image rem "${title}"` : 'Image rem',
+          path: shortenPathForWarning(
+            await safeHierarchyPath(plugin, rem, context),
+            named ? title : undefined
+          ),
+        });
       }
       output.push(buildVisibleWarningBlock(warningText));
       output.push('');
@@ -2266,10 +2384,11 @@ async function serializeNode(
       output.push(`\\${command}{${escapeLatex(title)}}`);
       output.push('');
     } else if (context.log) {
-      const path = await safeHierarchyPath(plugin, rem, context);
-      context.log.warn(
-        `Heading rem with no title${path ? ` (${path})` : ''}: no \\${command} was emitted, but its children were exported.`
-      );
+      context.log.warn({
+        reason: `This heading rem has no title, so no \\${command} was emitted — but its children were exported.`,
+        subject: 'Heading rem',
+        path: shortenPathForWarning(await safeHierarchyPath(plugin, rem, context)),
+      });
     }
 
     const children = await rem.getChildrenRem();
@@ -4318,7 +4437,16 @@ export type Rem2TexConvertRequest = { kind: Rem2TexConvertKind; selectedRemIds?:
 
 export type Rem2TexConvertIssue = {
   severity: 'error' | 'warning';
+  /** The reason, on its own — the popup renders it as the issue's first line. */
   message: string;
+  /** The rem it happened to, already quoted. */
+  subject?: string;
+  /** Outline path to that rem (segments already shortened). */
+  path?: string;
+  /** A short label introducing `quotes`. */
+  quotesLabel?: string;
+  /** Quoted content, each entry its own line. */
+  quotes?: string[];
 };
 
 export type Rem2TexConvertPreview = {
@@ -4455,7 +4583,16 @@ export async function previewRem2TexConvert(
   } catch (error) {
     issues.push({ severity: 'error', message: describeConvertError(error) });
   }
-  for (const warning of log.warnings) issues.push({ severity: 'warning', message: warning });
+  for (const warning of log.warnings) {
+    issues.push({
+      severity: 'warning',
+      message: warning.reason,
+      subject: warning.subject,
+      path: warning.path,
+      quotesLabel: warning.quotesLabel,
+      quotes: warning.quotes,
+    });
+  }
 
   const plan = await planCitekeyRewrite(plugin, scope.roots, scope.context);
   return {
