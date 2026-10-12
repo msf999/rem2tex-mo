@@ -274,8 +274,9 @@ export rem with the log in it.
   command never feeds an old export back into the new one.
 - **A todo the mode skips takes its whole subtree with it** (prose under a finished todo is gone in
   "unfinished only" mode); the log warns when that loses non-todo content.
-- **Citation keys** are the item doc's title with whitespace removed and anything outside
-  `A-Z a-z 0-9 : _ -` stripped; duplicate keys merge.
+- **Citation keys** are the item doc's title with whitespace removed and only the characters that
+  would break a `\cite{}` argument stripped (`\ { } , % # & ~ ^`) — so a key containing `$` or `.`,
+  like `wangFourelectronNegative$U$Vacancy2023`, is cited exactly as you wrote it. Duplicate keys merge.
 - **`Rem2Tex-ignore` must be the top-level rem** with exactly that name (the toggle command creates it
   there); a same-named rem nested elsewhere is not recognised.
 - **Remnote's own bold/italic/underline are not converted** — type the LaTeX you want.

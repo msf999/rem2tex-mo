@@ -820,9 +820,18 @@ function toLatexCitation(referenceText: string): string {
   if (!trimmed) return '';
   if (/^\\cite\{.+\}$/.test(trimmed)) return trimmed;
 
+  // A DENYLIST, not an allowlist: strip only what genuinely breaks a `\cite{}` argument, and keep
+  // everything else. The old allowlist (`[A-Za-z0-9:_-]`) silently mangled real citekeys — mo's
+  // library has seven, six of them containing `$` (`wangFourelectronNegative$U$Vacancy2023`) and one
+  // a `.` (`s.lambertFormationIntrinsicSilicon2017`). Those cite fine in LaTeX (mo, 2026-10-12:
+  // *"I have the key in my bib as wangFourelectronNegative$U$Vacancy2023, seems to work fine"*),
+  // because `\cite` does not typeset its argument — it writes the key to the `.aux` for biber. What
+  // is removed would really break things: `,` splits one key into two bogus ones, `{}` unbalance the
+  // argument, `\` starts a command, `%` comments out the rest of the line, and `#`, `&`, `~`, `^`
+  // are special wherever the key does get typeset (a failed citation prints it).
   const citationKey = trimmed
     .replace(/\s+/g, '')
-    .replace(/[^A-Za-z0-9:_-]/g, '');
+    .replace(/[\\{},%#&~^]/g, '');
   if (!citationKey) return '';
   return `\\cite{${citationKey}}`;
 }

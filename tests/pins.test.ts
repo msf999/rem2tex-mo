@@ -102,5 +102,42 @@ export async function run(): Promise<number> {
   const title = await runParagraphToTexConversion(plugin, { paragraphRem: para });
   t.check(`paragraph export returns a timestamped title (${title})`, /^Rem2Tex paragraph \d\d:\d\d [AP]M \d\d-\d\d-\d{4}$/.test(title));
 
+  // Citekeys keep every character that is legal in a `\cite{}` argument. The old allowlist
+  // (`[A-Za-z0-9:_-]`) mangled seven real keys in mo's library — six with `$`, one with `.` — into
+  // keys that matched nothing in the .bib, silently (2026-10-12).
+  {
+    const kb = createFakeKb();
+    const { mk, plugin } = kb;
+    mk('z', ['Zotero'], null);
+    mk('items', ['Items'], 'z');
+    const host = mk('host', [''], null);
+    const ctx: any = { hierarchyRemIds: new Set(['host']) };
+    const cite = async (key: string) => {
+      const id = 'item-' + key.replace(/\W+/g, '-');
+      if (!kb.rems[id]) mk(id, [key], 'items');
+      host.text = ['See ', ref(id), '.'];
+      return (await getRemTitle(plugin, host, ctx)).trim();
+    };
+
+    const keep: Array<[string, string, string]> = [
+      ['a $ in a citekey survives', 'wangFourelectronNegative$U$Vacancy2023', 'See \\cite{wangFourelectronNegative$U$Vacancy2023}.'],
+      ['subscript braces-free $_2$ survives', 'turanElectronicStructureCaSnN$_2$2026', 'See \\cite{turanElectronicStructureCaSnN$_2$2026}.'],
+      ['a dot survives', 's.lambertFormationIntrinsicSilicon2017', 'See \\cite{s.lambertFormationIntrinsicSilicon2017}.'],
+      ['a plain key is unchanged', 'smith2020', 'See \\cite{smith2020}.'],
+      ['colons, underscores and hyphens still survive', 'a:b_c-d2020', 'See \\cite{a:b_c-d2020}.'],
+    ];
+    for (const [name, key, expected] of keep) t.equal(name, await cite(key), expected);
+
+    // ...but anything that would break the argument is still removed.
+    const strip: Array<[string, string, string]> = [
+      ['a comma would split one key into two', 'bad,key2020', 'See \\cite{badkey2020}.'],
+      ['braces would unbalance the argument', 'bad{key}2020', 'See \\cite{badkey2020}.'],
+      ['a backslash would start a command', 'bad\\key2020', 'See \\cite{badkey2020}.'],
+      ['a percent would comment out the line', 'bad%key2020', 'See \\cite{badkey2020}.'],
+      ['an ampersand is special wherever it is typeset', 'bad&key2020', 'See \\cite{badkey2020}.'],
+    ];
+    for (const [name, key, expected] of strip) t.equal(name, await cite(key), expected);
+  }
+
   return t.failures();
 }
