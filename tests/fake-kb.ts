@@ -48,6 +48,10 @@ export function createFakeKb() {
         if (!r.powerups.includes(code)) r.powerups.push(code);
         r.props[code] = { ...(r.props[code] ?? {}), [slot]: value };
       },
+      /** Records `collapse()` so a test can assert the Log is folded away. */
+      collapsed: false,
+      collapse: async () => { r.collapsed = true; },
+      expand: async () => { r.collapsed = false; },
       isPowerupProperty: async () => false,
       isPowerupPropertyListItem: async () => false,
       isPowerupSlot: async () => false,
@@ -74,15 +78,26 @@ export function createFakeKb() {
 
   /** The rem the focus chain resolves to; set with `focus(rem)` before calling an entry point. */
   let focused: FakeRem | undefined;
+  /** The rem open in the focused pane, for the `getOpenPaneRemId` fallback. */
+  let openPane: FakeRem | undefined;
+  const session = new Map<string, unknown>();
 
   const plugin: any = {
     // Enough of the focus chain for `getFocusedParentRem` to resolve a target.
     focus: { getFocusedRem: async () => focused },
     editor: { getSelectedRem: async () => undefined, getSelection: async () => undefined },
-    window: { getFocusedPaneId: async () => undefined, getOpenPaneRemId: async () => undefined },
+    window: {
+      getFocusedPaneId: async () => (openPane ? 'pane-1' : undefined),
+      getOpenPaneRemId: async () => openPane?._id,
+    },
+    // A REAL in-memory session store: the focus cache that survives the Omnibar lives here, and a
+    // no-op stub could never catch a bug in it (2026-10-12).
     storage: {
-      setSession: async () => undefined,
-      getSession: async () => undefined,
+      setSession: async (key: string, value: unknown) => {
+        if (value === undefined) session.delete(key);
+        else session.set(key, value);
+      },
+      getSession: async (key: string) => session.get(key),
     },
     rem: {
       findOne: async (id: string) => rems[id],
@@ -101,7 +116,15 @@ export function createFakeKb() {
     },
   };
 
-  return { rems, mk, plugin, captured, focus: (rem: FakeRem) => { focused = rem; } };
+  return {
+    rems,
+    mk,
+    plugin,
+    captured,
+    session,
+    focus: (rem: FakeRem | undefined) => { focused = rem; },
+    openInPane: (rem: FakeRem | undefined) => { openPane = rem; },
+  };
 }
 
 /** A `latex` code-block text element. */
@@ -110,6 +133,16 @@ export const code = (text: string) => ({ i: 'm', text, code: true, language: 'la
 export const pin = (id: string) => ({ i: 'q', _id: id, pin: true });
 /** An inline rem reference (renders the target's name as words) to `id`. */
 export const ref = (id: string) => ({ i: 'q', _id: id });
+/**
+ * A reference whose target no longer exists. RemNote keeps the deleted rem's breadcrumb, which is
+ * what makes a lost citation recoverable — `deadRef('Zotero | Items | smith2020')`.
+ */
+export const deadRef = (remembered: string, opts: { pin?: boolean } = {}) => ({
+  i: 'q',
+  _id: 'deleted-' + remembered.replace(/\W+/g, '-'),
+  ...(opts.pin ? { pin: true } : {}),
+  textOfDeletedRem: remembered.split('|').flatMap((part, i) => (i === 0 ? [part.trim()] : [' | ', part.trim()])),
+});
 /** Remzot's powerup code, so a fake item doc can carry real-looking metadata slots. */
 export const ZOTERO_ITEM_POWERUP = 'zotero-item';
 /** Extra props that make a fake rem an unfinished todo. */

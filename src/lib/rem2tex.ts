@@ -3,6 +3,27 @@ import type { RNPlugin, PluginRem as Rem } from '@remnote/plugin-sdk';
 const REQUIRED_PREAMBLE_NAME = 'Preamble';
 const REQUIRED_END_NAME = 'End';
 const HEADING_COMMANDS = ['section', 'subsection', 'subsubsection', 'paragraph', 'subparagraph'];
+
+/**
+ * The sectioning command a heading's title ALREADY is, when the author typed the whole thing
+ * themselves (`\subsection{Chemical Potentials}`), or undefined when it is ordinary prose.
+ *
+ * Wrapping such a title again produced `\subsection{\subsection{…}}`, which LaTeX cannot typeset —
+ * five of them in mo's real paper (2026-10-12). The whole title must be the one command, so prose
+ * that merely mentions a command, or text after the closing brace, is NOT treated as one.
+ */
+function typedSectioningCommand(title: string): { command: string; level: number } | undefined {
+  const trimmed = title.trim();
+  const match = /^\\(section|subsection|subsubsection|paragraph|subparagraph)\*?\s*\{/.exec(trimmed);
+  if (!match) return undefined;
+  const open = trimmed.indexOf('{', match[0].length - 1);
+  if (open === -1) return undefined;
+  // `findMatchingGroup` returns the index JUST PAST the closing brace, and is escape-aware.
+  const close = findMatchingGroup(trimmed, open, '{', '}');
+  if (close === -1 || close !== trimmed.length) return undefined;
+  const command = match[1];
+  return { command, level: HEADING_COMMANDS.indexOf(command) + 1 };
+}
 export type Rem2TexTodoExportMode = 'all' | 'unfinished' | 'none';
 export type Rem2TexConversionContext = {
   hierarchyRemIds: Set<string>;
@@ -125,6 +146,18 @@ const GENERIC_ERROR_HINTS = [
  * text and the readon for the warning so it is easier to read?"*). Both renderers — the Log code
  * block and the popup callout — lay the parts out themselves, so the split has to live here.
  */
+/**
+ * A reference whose target rem no longer exists, recorded by the flattener and drained by
+ * `serializeNode` — which is the only place that knows WHICH rem the reference sat in, and so the
+ * only place that can name a location in the warning.
+ */
+export type Rem2TexDanglingReference = {
+  /** What RemNote still remembers the deleted rem was called (`textOfDeletedRem`). */
+  remembered: string;
+  /** The citation emitted in its place, when the breadcrumb identified a `Zotero/Items` entry. */
+  recoveredCitation?: string;
+};
+
 export type Rem2TexWarning = {
   /** Why this is a warning: one sentence, with no quoted content and no path in it. */
   reason: string;
@@ -148,6 +181,8 @@ const WARNING_SUBJECT_MAX = 90;
 export class Rem2TexLog {
   readonly startedAt = new Date();
   readonly warnings: Rem2TexWarning[] = [];
+  /** Dangling references seen since the last drain; see `Rem2TexDanglingReference`. */
+  private pendingDangling: Rem2TexDanglingReference[] = [];
   readonly counts = {
     headings: 0,
     paragraphs: 0,
@@ -181,6 +216,17 @@ export class Rem2TexLog {
 
   warn(warning: Rem2TexWarning): void {
     this.warnings.push(warning);
+  }
+
+  danglingReference(entry: Rem2TexDanglingReference): void {
+    this.pendingDangling.push(entry);
+  }
+
+  /** Hand over everything recorded since the last call, so the caller can warn with its own path. */
+  takeDanglingReferences(): Rem2TexDanglingReference[] {
+    const taken = this.pendingDangling;
+    this.pendingDangling = [];
+    return taken;
   }
 
   citation(citeCommand: string): void {
@@ -235,11 +281,11 @@ export class Rem2TexLog {
     out.push('', 'Result', '------');
     if (result.status === 'success') {
       out.push(
-        `- SUCCESS${this.warnings.length > 0 ? ` with ${this.warnings.length} warning(s)` : ''}: ${result.latexLineCount} line(s) of LaTeX in the Paper rem's code block.`
+        `- SUCCESS${this.warnings.length > 0 ? ` with ${this.warnings.length} warning(s)` : ''}: ${result.latexLineCount} line(s) of LaTeX in the code block above.`
       );
     } else {
       out.push(...formatFailureForLog(result.error));
-      out.push('- No Paper rem was written.');
+      out.push('- No LaTeX code block was written.');
     }
     return out.join('\n');
   }
@@ -1099,7 +1145,11 @@ async function flattenRichTextElement(
     }
     const linkedRem = await plugin.rem.findOne(entry._id);
     if (!linkedRem) {
-      return '';
+      // The target was deleted (or never arrived — an import that left its Zotero items behind).
+      // RemNote still keeps the rem's breadcrumb in `textOfDeletedRem`, so a citation is often
+      // recoverable; before 2026-10-12 this returned '' and a typed `\cite{` + ref + `}` collapsed
+      // to a silent, bibliography-breaking `\cite{}`.
+      return resolveDeletedReference(entry, options);
     }
     const nextSeen = new Set(seenRemIds);
     nextSeen.add(entry._id);
@@ -1169,6 +1219,44 @@ async function flattenRichTextElement(
   }
 
   return '';
+}
+
+/**
+ * Recover what a deleted reference pointed at, from the breadcrumb RemNote preserves on the element.
+ *
+ * `textOfDeletedRem` holds the target's path as rich text, e.g.
+ * `["Zotero", " | ", "Items", " | ", "smith2020"]`. When that path runs `Zotero` → `Items` → X, the
+ * reference was a citation and X is the citekey, so the citation is emitted exactly as a live
+ * reference would have emitted it. Anything else keeps its remembered text when it was an inline
+ * reference (those read as words in the sentence) and is dropped when it was a pin, matching how a
+ * live reference of each kind behaves. Either way the loss is RECORDED: a reference into thin air is
+ * something the author has to fix, and it used to vanish without a word.
+ */
+function resolveDeletedReference(entry: Record<string, unknown>, options: FlattenOptions): string {
+  const remembered = flattenRawTitleText(entry.textOfDeletedRem).replace(/\s+/g, ' ').trim();
+  if (!remembered) {
+    options.log?.danglingReference({ remembered: '(no remembered text)' });
+    return '';
+  }
+
+  // The breadcrumb separator RemNote writes between path segments.
+  const segments = remembered.split('|').map((part) => part.trim()).filter((part) => part.length > 0);
+  const itemsAt = segments.findIndex(
+    (part, i) => part === ZOTERO_ITEMS_TITLE && segments[i - 1] === ZOTERO_ROOT_TITLE
+  );
+  const citekey = itemsAt >= 0 ? segments[itemsAt + 1] : undefined;
+
+  if (citekey) {
+    const citation = toLatexCitation(citekey);
+    options.log?.danglingReference({ remembered, recoveredCitation: citation });
+    options.log?.citation(citation);
+    return citation;
+  }
+
+  options.log?.danglingReference({ remembered });
+  // A pin contributes nothing to prose; an inline reference reads as words, so keep what we know.
+  if (entry.pin === true && !options.todoContentResolvePinsAsText) return '';
+  return segments[segments.length - 1] ?? '';
 }
 
 /**
@@ -1562,9 +1650,72 @@ export async function resolvePaperRoot(
   });
 }
 
+/**
+ * Session-storage key holding the rem the caret was last in, as `{ remId, capturedAt }`.
+ *
+ * The Omnibar wipes `focus.getFocusedRem()` before a command's `action` runs — the same theft
+ * already documented for `editor.getSelection()`, and measured again on 2026-10-12: clicking a rem
+ * gives `getFocusedRem() === that rem`, and one `Cmd+/` later it is `null`. Without a cache the
+ * resolver falls through to the OPEN PANE's rem, so a paper nested inside the open document is
+ * invisible and the command reports "no child titled Preamble" about the document.
+ *
+ * `src/widgets/index.tsx` writes this from its `EditorSelectionChanged` listener, where focus is
+ * still live. It is deliberately NOT consumed on read: the popup resolves the target twice (once to
+ * preview, once to run), and a one-shot cache would strand the second call.
+ */
+/** The rem open in the focused pane, or undefined — never throws. */
+async function openPaneRemId(plugin: RNPlugin): Promise<string | undefined> {
+  try {
+    const paneId = await plugin.window.getFocusedPaneId();
+    return (await plugin.window.getOpenPaneRemId(paneId)) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Is `rem` the pane's rem, or somewhere underneath it? Walks parents, bounded like the Zotero walk. */
+async function isSelfOrDescendantOf(
+  plugin: RNPlugin,
+  rem: Rem,
+  ancestorId: string | undefined
+): Promise<boolean> {
+  // With no pane to compare against there is nothing to contradict the cache, so trust it.
+  if (!ancestorId) return true;
+  let current: Rem | undefined = rem;
+  for (let hops = 0; hops < 64 && current; hops += 1) {
+    if (current._id === ancestorId) return true;
+    const parentId: string | undefined = current.parent ?? undefined;
+    if (!parentId) return false;
+    current = (await plugin.rem.findOne(parentId)) ?? undefined;
+  }
+  return false;
+}
+
+export const REM2TEX_FOCUS_CACHE_KEY = 'rem2tex-last-focused-rem';
+/** How long a cached caret position may stand in for live focus. */
+export const REM2TEX_FOCUS_CACHE_TTL_MS = 120_000;
+
+export type Rem2TexFocusCacheEntry = { remId: string; capturedAt: number };
+
 export async function getFocusedParentRem(plugin: RNPlugin): Promise<Rem> {
   const focusedRem = await plugin.focus.getFocusedRem();
   if (focusedRem) return focusedRem;
+
+  // Live focus is gone (the Omnibar, or a popup, took it). Fall back to where the caret last was,
+  // which is the rem the author actually clicked, BEFORE falling back to the open pane.
+  const paneRemIdForGuard = await openPaneRemId(plugin);
+  try {
+    const cached = await plugin.storage.getSession<Rem2TexFocusCacheEntry>(REM2TEX_FOCUS_CACHE_KEY);
+    if (cached?.remId && Date.now() - cached.capturedAt < REM2TEX_FOCUS_CACHE_TTL_MS) {
+      const cachedRem = await plugin.rem.findOne(cached.remId);
+      // Only honour a remembered caret that is still inside what the author is LOOKING at. Without
+      // this, clicking a rem, navigating elsewhere and running the command would export the rem you
+      // left rather than the document you are on — worse than the open-pane fallback it replaces.
+      if (cachedRem && (await isSelfOrDescendantOf(plugin, cachedRem, paneRemIdForGuard))) return cachedRem;
+    }
+  } catch {
+    /* no cache available: carry on down the chain */
+  }
 
   const selected = await plugin.editor.getSelectedRem();
   const selectedRemId = selected?.remIds?.[0];
@@ -1581,10 +1732,8 @@ export async function getFocusedParentRem(plugin: RNPlugin): Promise<Rem> {
     return selectedRem;
   }
 
-  const focusedPaneId = await plugin.window.getFocusedPaneId();
-  const paneRemId = await plugin.window.getOpenPaneRemId(focusedPaneId);
-  if (paneRemId) {
-    const paneRem = await plugin.rem.findOne(paneRemId);
+  if (paneRemIdForGuard) {
+    const paneRem = await plugin.rem.findOne(paneRemIdForGuard);
     if (paneRem) return paneRem;
   }
 
@@ -2172,6 +2321,48 @@ function shortenPathForWarning(path: string | undefined, ownTitle?: string): str
     .join(' > ');
 }
 
+/**
+ * Turn whatever the flattener recorded while reading THIS rem into warnings, now that the rem — and
+ * so a path — is known. A reference into thin air is never silent: it either became a recovered
+ * citation (say which) or lost content (say what).
+ */
+async function reportDanglingReferences(
+  plugin: RNPlugin,
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<void> {
+  const log = context.log;
+  if (!log) return;
+  const dangling = log.takeDanglingReferences();
+  if (dangling.length === 0) return;
+  const path = shortenPathForWarning(await safeHierarchyPath(plugin, rem, context));
+  const subject = `Rem "${displayTitleForWarning(rem, WARNING_SUBJECT_MAX)}"`;
+  for (const entry of dangling) {
+    log.warn(
+      entry.recoveredCitation
+        ? {
+            reason:
+              `A reference here points at a rem that no longer exists. Its citekey was recovered from ` +
+              `the name RemNote remembers, and exported as ${entry.recoveredCitation} — but the item is ` +
+              `gone from Zotero/Items, so add it back before relying on the bibliography.`,
+            subject,
+            path,
+            quotesLabel: 'the deleted rem was',
+            quotes: [`"${entry.remembered.slice(0, WARNING_QUOTE_MAX)}"`],
+          }
+        : {
+            reason:
+              `A reference here points at a rem that no longer exists, and it is not an item under ` +
+              `Zotero/Items, so no citation could be recovered from it.`,
+            subject,
+            path,
+            quotesLabel: 'the deleted rem was',
+            quotes: [`"${entry.remembered.slice(0, WARNING_QUOTE_MAX)}"`],
+          }
+    );
+  }
+}
+
 /** Count a todo skipped by the todo mode and warn when non-todo content vanishes with it. */
 async function noteSkippedTodo(
   plugin: RNPlugin,
@@ -2358,6 +2549,7 @@ async function serializeNode(
     throw await enrichConversionErrorWithSourceRem(plugin, error, rem, context, outlineLocation);
   }
   let { text: title, fromCodeBlock } = titleResult;
+  await reportDanglingReferences(plugin, rem, context);
   if (isHeading && isTodo) {
     // A todo heading carries RemNote's Status reference. `isBookkeepingRem` already drops it, but
     // strip any leftover `\cite{Status}` too — keeping the RESOLVED title so math and Zotero
@@ -2381,7 +2573,28 @@ async function serializeNode(
     if (title) {
       // Counted only when a sectioning command is actually emitted, so the Log matches the paper.
       if (context.log) context.log.counts.headings += 1;
-      output.push(`\\${command}{${escapeLatex(title)}}`);
+      const typed = fromCodeBlock ? undefined : typedSectioningCommand(title);
+      if (typed) {
+        // The author already wrote the command. Emit it as they typed it rather than wrapping it
+        // again, and say so when their level disagrees with the one the outline implies — Rem2Tex
+        // derives depth from NESTING, so a mismatch means the rem sits at a different depth than
+        // the author thinks.
+        output.push(title.trim());
+        if (typed.command !== command && context.log) {
+          context.log.warn({
+            reason:
+              `This heading already contains \\${typed.command}{…}, so it was emitted as typed rather ` +
+              `than wrapped again — but its depth in the outline implies \\${command}. Move the rem, or ` +
+              `change the command, so the two agree.`,
+            subject: `Heading rem`,
+            path: shortenPathForWarning(await safeHierarchyPath(plugin, rem, context)),
+            quotesLabel: 'as typed',
+            quotes: [`"${title.trim().slice(0, WARNING_QUOTE_MAX)}"`],
+          });
+        }
+      } else {
+        output.push(`\\${command}{${escapeLatex(title)}}`);
+      }
       output.push('');
     } else if (context.log) {
       context.log.warn({
@@ -3889,7 +4102,6 @@ async function getOrCreateRem2TexRoot(
 }
 
 const LOG_CODE_LANGUAGE = 'text';
-const PAPER_REM_TITLE = 'Paper';
 const LOG_REM_TITLE = 'Log';
 
 /** A titled rem under `parent` holding one code-block child (`Paper` → latex, `Log` → text). */
@@ -3898,7 +4110,8 @@ async function createTitledCodeBlockRem(
   parent: Rem,
   title: string,
   code: string,
-  language: string
+  language: string,
+  options: { collapsed?: boolean } = {}
 ): Promise<void> {
   const titledRem = await plugin.rem.createRem();
   if (!titledRem) {
@@ -3913,11 +4126,24 @@ async function createTitledCodeBlockRem(
   }
   await codeRem.setParent(titledRem);
   await codeRem.setText(await plugin.richText.code(code, language).value());
+
+  if (options.collapsed) {
+    // `collapse(ctx)` takes the CONTEXT to collapse in, not an optional portal: collapse state is
+    // per-view in RemNote, so passing `undefined` silently does nothing (measured 2026-10-12 — the
+    // call resolved fine and the Log rendered fully expanded). Passing the parent is what folds it
+    // in the outline the author is reading. Best effort: a log that will not fold is a nuisance, not
+    // a reason to lose a finished export.
+    try {
+      await titledRem.collapse(parent);
+    } catch {
+      /* older build, or no collapse in this context */
+    }
+  }
 }
 
 /**
- * `Rem2Tex` folder (created once under the paper rem) → `Rem2Tex <timestamp>` export rem →
- * `Paper` rem with a `latex` code block child (omitted when the conversion failed) and `Log` rem
+ * `Rem2Tex` folder (created once under the paper rem) → `Rem2Tex <timestamp>` export rem → the
+ * `latex` code block DIRECTLY (omitted when the conversion failed) and a `Log` rem
  * with a `text` code block child — titled rems so the two are told apart at a glance.
  */
 async function createOutputRem(
@@ -3936,10 +4162,23 @@ async function createOutputRem(
   await outputRem.setText([outputTitle]);
   await outputRem.setParent(rem2TexRoot);
 
+  // The document goes straight under the timestamp rem, with no `Paper` wrapper (mo, 2026-10-12:
+  // *"the exported block should go immediatly under Rem2Tex 04:20 PM 12-10-2026"*). The pair is
+  // still easy to tell apart — which is why the wrapper existed in the first place — because the
+  // bare code block is the paper and the titled one is the Log.
   if (latex !== undefined) {
-    await createTitledCodeBlockRem(plugin, outputRem, PAPER_REM_TITLE, latex, 'latex');
+    const codeRem = await plugin.rem.createRem();
+    if (!codeRem) {
+      throw new Error('Failed to create the LaTeX code block rem.');
+    }
+    await codeRem.setParent(outputRem);
+    await codeRem.setText(await plugin.richText.code(latex, 'latex').value());
   }
-  await createTitledCodeBlockRem(plugin, outputRem, LOG_REM_TITLE, logText, LOG_CODE_LANGUAGE);
+  // Collapsed, so the export reads as the document plus a folded Log rather than a wall of log text
+  // (mo, 2026-10-12).
+  await createTitledCodeBlockRem(plugin, outputRem, LOG_REM_TITLE, logText, LOG_CODE_LANGUAGE, {
+    collapsed: true,
+  });
 
   return outputTitle;
 }

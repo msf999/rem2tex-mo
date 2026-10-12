@@ -9,6 +9,8 @@ import {
   previewRem2TexConvert,
   REM2TEX_CONVERT_REQUEST_KEY,
   REM2TEX_CONVERT_WIDGET,
+  REM2TEX_FOCUS_CACHE_KEY,
+  type Rem2TexFocusCacheEntry,
   type Rem2TexConvertKind,
   type Rem2TexConvertRequest,
   runRem2TexConvert,
@@ -30,6 +32,20 @@ type CachedRemSelection = { remIds: string[]; capturedAt: number };
 function registerSelectionTracker(plugin: ReactRNPlugin): void {
   plugin.event.addListener(AppEvents.EditorSelectionChanged, undefined, async () => {
     try {
+      // Whatever kind of selection this is, the caret is live RIGHT NOW — record which rem it is in.
+      // By the time a command runs, the Omnibar has wiped `focus.getFocusedRem()` (measured
+      // 2026-10-12), and without this the resolver falls back to the open pane's rem, which is the
+      // document rather than a paper nested inside it.
+      try {
+        const focused = await plugin.focus.getFocusedRem();
+        if (focused) {
+          const entry: Rem2TexFocusCacheEntry = { remId: focused._id, capturedAt: Date.now() };
+          await plugin.storage.setSession(REM2TEX_FOCUS_CACHE_KEY, entry);
+        }
+      } catch {
+        /* best effort */
+      }
+
       const selection = await plugin.editor.getSelection();
       if (selection?.type === SelectionType.Rem) {
         const remIds = (selection as { remIds?: string[] }).remIds;

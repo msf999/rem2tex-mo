@@ -55,7 +55,7 @@ Paper (any name)
 ├─ Supplementary Information     ← anything after End is ignored
 └─ Rem2Tex                       ← created by Rem2Tex, one child per run
    ├─ Rem2Tex 03:23 PM 03-09-2026
-   │  ├─ Paper  → [latex code block]   the whole document
+   │  ├─ [latex code block]            the whole document
    │  └─ Log    → [text code block]    the conversion log
    └─ Rem2Tex rewrite 03:23 PM 03-09-2026    ← only if you ticked the citekey option
 ```
@@ -233,7 +233,8 @@ item doc exists but has never been synced (then it reads *its Zotero properties 
 
 ## Output and the log
 
-Every paper export writes `Rem2Tex / Rem2Tex <timestamp> / { Paper, Log }` under the paper rem and
+Every paper export writes `Rem2Tex / Rem2Tex <timestamp> / { the LaTeX code block, Log }` under the
+paper rem and
 toasts one line — exported, exported with *n* warnings, or failed, read the log. The log is plain
 text: **Setup** (command, todo mode, paper rem) · **Structure** (where `Preamble` and `End` sit, which
 body rems were converted, what was ignored) · **Conversion** (block sizes, `\documentclass`, `\title`,
@@ -278,6 +279,15 @@ export rem with the log in it.
 - **`Rem2Tex-ignore` must be the top-level rem** with exactly that name (the toggle command creates it
   there); a same-named rem nested elsewhere is not recognised.
 - **Remnote's own bold/italic/underline are not converted** — type the LaTeX you want.
+- **A heading you already wrote as a command is left alone.** If a heading rem's text is literally
+  `\subsection{Chemical Potentials}`, that is what you get — not `\subsection{\subsection{…}}`.
+  Heading depth otherwise comes from outline nesting (a sister of `Preamble` is a `\section`, its
+  heading children are `\subsection`s), and the log warns if the command you typed sits at a
+  different depth than the outline implies.
+- **A reference to a deleted rem does not silently vanish.** Remnote remembers what the rem was
+  called, so if it was an item under `Zotero / Items` its citekey is still used; otherwise an inline
+  reference keeps its remembered words and a pin contributes nothing, as usual. Either way the log
+  warns, naming the rem and what it used to be — so a citation can never disappear unnoticed.
 - **The citekey rewrite preserves everything else in the rem** — bold, maths, clozes and your other
   references are carried across untouched, because only the pins and the text around them are
   rewritten.

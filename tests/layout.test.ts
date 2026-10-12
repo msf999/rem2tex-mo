@@ -1,5 +1,5 @@
 import { runRem2TexConversion, runParagraphToTexConversion, isRem2TexConversionError, REM2TEX_IGNORE_TAG } from '../src/lib/rem2tex';
-import { createFakeKb, code, heading, pin, suite, todo } from './fake-kb';
+import { createFakeKb, code, deadRef, heading, pin, suite, todo } from './fake-kb';
 
 /** Paper layout (Preamble/End anchors, any child as starting point), the Paper/Log output shape, the Log text. */
 export async function run(): Promise<number> {
@@ -30,13 +30,22 @@ export async function run(): Promise<number> {
     const exportRem: any = Object.values(rems).find((r: any) => typeof r.text[0] === 'string' && r.text[0].startsWith('Rem2Tex ') && rems[r.parent]?.text[0] === 'Rem2Tex');
     const folder: any = exportRem && rems[exportRem.parent];
     const kids: any[] = Object.values(rems).filter((r: any) => r.parent === exportRem?._id);
-    const paperRem = kids.find((r) => r.text[0] === 'Paper');
-    const logRem = kids.find((r) => r.text[0] === 'Log');
-    const paperCode: any = Object.values(rems).find((r: any) => r.parent === paperRem?._id);
+    // Since 2026-10-12 the LaTeX block is a DIRECT child of the timestamp rem — no `Paper` wrapper
+    // (mo). The Log keeps its title, which is what still tells the two apart.
+    const latexCode = kids.find((r: any) => r.text?.[0]?.language === 'latex');
+    const logRem = kids.find((r: any) => r.text[0] === 'Log');
     const logCode: any = Object.values(rems).find((r: any) => r.parent === logRem?._id);
-    t.check('shape: paper rem → Rem2Tex → timestamp rem → Paper → latex block, → Log → text block',
-      !!folder && folder.parent === 'paper' && kids.length === 2 && kids[0] === paperRem && kids[1] === logRem && paperCode?.text?.[0]?.language === 'latex' && paperCode.text[0].text === expected && logCode?.text?.[0]?.language === 'text' && logCode.text[0].text.startsWith('Rem2Tex conversion log'),
-      JSON.stringify(kids.map((k) => k.text[0])));
+    t.check('shape: paper rem → Rem2Tex → timestamp rem → [latex block] + Log → text block',
+      !!folder && folder.parent === 'paper' && kids.length === 2 && kids[0] === latexCode && kids[1] === logRem
+        && latexCode.text[0].text === expected
+        && logCode?.text?.[0]?.language === 'text' && logCode.text[0].text.startsWith('Rem2Tex conversion log'),
+      JSON.stringify(kids.map((k: any) => k.text?.[0]?.language === 'latex' ? '[latex block]' : k.text[0])));
+    t.check('and there is no "Paper" wrapper rem any more',
+      !kids.some((r: any) => r.text[0] === 'Paper'),
+      JSON.stringify(kids.map((k: any) => k.text?.[0]?.language || k.text[0])));
+    // The Log is folded away by default; the document itself is not (mo, 2026-10-12).
+    t.check('the Log rem is created collapsed', logRem?.collapsed === true, JSON.stringify({ log: logRem?.collapsed }));
+    t.check('and the latex block is left expanded', latexCode?.collapsed !== true, JSON.stringify({ latex: latexCode?.collapsed }));
   }
 
   // 2. from the Preamble rem and from a sibling section: same paper, same output
@@ -84,8 +93,8 @@ export async function run(): Promise<number> {
   captured.latex = 'UNCHANGED';
   captured.log = '';
   const res5 = await runRem2TexConversion(plugin, { parentRem: p5 });
-  t.check('empty Preamble → status failed, no Paper rem, Log explains EMPTY_BOUNDARY_BLOCK',
-    res5.status === 'failed' && res5.errorCode === 'EMPTY_BOUNDARY_BLOCK' && captured.latex === 'UNCHANGED' && captured.log.includes('FAILED — EMPTY_BOUNDARY_BLOCK') && captured.log.includes('No Paper rem was written'),
+  t.check('empty Preamble → status failed, no LaTeX block, Log explains EMPTY_BOUNDARY_BLOCK',
+    res5.status === 'failed' && res5.errorCode === 'EMPTY_BOUNDARY_BLOCK' && captured.latex === 'UNCHANGED' && captured.log.includes('FAILED — EMPTY_BOUNDARY_BLOCK') && captured.log.includes('No LaTeX code block was written'),
     JSON.stringify(res5) + '\n' + captured.log);
 
   // 5. a warning (image rem without media) is counted and listed
@@ -301,6 +310,67 @@ export async function run(): Promise<number> {
   t.check('the path does not repeat the rem the warning already named',
     !/at:   [^\n]*Judy: relate this back/.test(warn13),
     warn13);
+
+  // 14. A reference whose target was deleted. RemNote keeps the breadcrumb, so a Zotero citation is
+  // recoverable; before 2026-10-12 this silently became `\cite{}` and broke the bibliography.
+  const p14 = mk('p14', ['Paper 14'], null);
+  mk('p14pre', ['Preamble'], 'p14');
+  mk('p14pre1', [code('P')], 'p14pre');
+  const p14body = mk('p14body', ['Body'], 'p14', heading);
+  mk('p14a', ['Recoverable ', deadRef('Zotero | Items | smith2020'), '.'], p14body._id);
+  mk('p14b', ['Typed around it \\cite{', deadRef('Zotero | Items | jones2019'), '}.'], p14body._id);
+  mk('p14c', ['An ordinary ', deadRef('Some Project | a deleted note'), ' reference.'], p14body._id);
+  mk('p14d', ['A dropped pin ', deadRef('Some Project | a deleted note', { pin: true }), '.'], p14body._id);
+  mk('p14end', ['End'], 'p14');
+  mk('p14end1', [code('E')], 'p14end');
+  captured.latex = '';
+  captured.log = '';
+  const res14 = await runRem2TexConversion(plugin, { parentRem: p14 });
+
+  t.check('a deleted Zotero reference is recovered as its citation, not dropped',
+    captured.latex.includes('Recoverable \\cite{smith2020}.'), captured.latex);
+  t.check('and a typed \\cite{} around one is not left empty',
+    captured.latex.includes('\\cite{jones2019}') && !/\\cite\{\s*\}/.test(captured.latex), captured.latex);
+  t.check('a deleted NON-Zotero inline reference keeps its remembered words',
+    captured.latex.includes('An ordinary a deleted note reference.'), captured.latex);
+  t.check('a deleted NON-Zotero PIN still contributes nothing to prose',
+    captured.latex.includes('A dropped pin .'), captured.latex);
+  t.check('every dangling reference is warned about, never silent',
+    res14.warningCount === 4 && (captured.log.match(/points at a rem that no longer exists/g) || []).length === 4,
+    JSON.stringify(res14) + '\n' + captured.log.slice(captured.log.indexOf('Warnings (')));
+  t.check('the recovered one says what it exported and names the deleted rem',
+    /exported as \\cite\{smith2020\}/.test(captured.log) && /the deleted rem was:\n      · "Zotero \| Items \| smith2020"/.test(captured.log),
+    captured.log.slice(captured.log.indexOf('Warnings (')));
+
+  // 15. A heading whose title IS a sectioning command must not be wrapped again.
+  const p15 = mk('p15', ['Paper 15'], null);
+  mk('p15pre', ['Preamble'], 'p15');
+  mk('p15pre1', [code('P')], 'p15pre');
+  const si = mk('p15si', ['Supplementary'], 'p15', heading);           // level 1 -> \section
+  mk('p15match', ['\\subsection{Chemical Potentials}'], si._id, heading);   // level 2 -> matches
+  mk('p15mismatch', ['\\paragraph{Too deep}'], si._id, heading);            // level 2 -> mismatch
+  mk('p15plain', ['Ordinary Heading'], si._id, heading);                      // untouched
+  mk('p15star', ['\\subsection*{Starred}'], si._id, heading);               // starred form counts
+  mk('p15prose', ['See \\subsection{x} for details'], si._id, heading);     // NOT a whole command
+  mk('p15end', ['End'], 'p15');
+  mk('p15end1', [code('E')], 'p15end');
+  captured.latex = '';
+  captured.log = '';
+  const res15 = await runRem2TexConversion(plugin, { parentRem: p15 });
+
+  t.check('a typed \\subsection{} at the matching depth is emitted once, not doubled',
+    captured.latex.includes('\\subsection{Chemical Potentials}')
+      && !/\\subsection\{\\subsection/.test(captured.latex), captured.latex);
+  t.check('a starred form is recognised too', captured.latex.includes('\\subsection*{Starred}'), captured.latex);
+  t.check('an ordinary heading is still wrapped', captured.latex.includes('\\subsection{Ordinary Heading}'), captured.latex);
+  t.check('prose that merely mentions a command is NOT treated as one',
+    captured.latex.includes('\\subsection{See \\subsection{x} for details}'), captured.latex);
+  t.check('a typed command at the WRONG depth is emitted as typed, with one warning',
+    captured.latex.includes('\\paragraph{Too deep}') && res15.warningCount === 1
+      && /already contains \\paragraph\{…\}/.test(captured.log)
+      && /implies \\subsection/.test(captured.log),
+    JSON.stringify(res15) + '\n' + captured.log.slice(captured.log.indexOf('Warnings (')));
+  t.check('and a MATCHING one produces no warning', res15.warningCount === 1, String(res15.warningCount));
 
   return t.failures();
 }

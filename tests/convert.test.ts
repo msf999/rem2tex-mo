@@ -1,5 +1,7 @@
 import {
   applyCitekeyRewrite,
+  getFocusedParentRem,
+  REM2TEX_FOCUS_CACHE_KEY,
   planCitekeyRewrite,
   previewRem2TexConvert,
   runRem2TexConvert,
@@ -516,6 +518,50 @@ export async function run(): Promise<number> {
         kb.captured.latex
       );
     }
+  }
+
+  // The Omnibar wipes `focus.getFocusedRem()` before a command's action runs (measured live
+  // 2026-10-12), so the resolver falls back to the remembered caret. Without it, a paper nested
+  // inside the open document is invisible and the command reports "no child titled Preamble"
+  // about the DOCUMENT.
+  {
+    const kb = buildKb();
+    const { rems, plugin } = kb;
+    // The shape that broke: the paper sits one level inside the document that is open.
+    const doc = kb.mk('doc', ['A Project Document'], null);
+    rems['paper'].parent = doc._id;
+    kb.openInPane(doc);
+    kb.focus(undefined); // the Omnibar has taken focus
+
+    // (a) with no cache, the old behaviour: the open document, which is not a paper
+    const noCache = await getFocusedParentRem(plugin);
+    t.equal('with no remembered caret it falls back to the open pane', noCache._id, 'doc');
+    const blocked = await previewRem2TexConvert(plugin, { kind: 'paper' });
+    t.check(
+      'which is exactly the "not a paper" failure mo hit',
+      blocked.blocked && blocked.issues.some((i) => /Preamble/.test(i.message)),
+      JSON.stringify(blocked.issues)
+    );
+
+    // (b) with the caret remembered, the rem the author actually clicked wins
+    await plugin.storage.setSession(REM2TEX_FOCUS_CACHE_KEY, { remId: 'intro', capturedAt: Date.now() });
+    const cached = await getFocusedParentRem(plugin);
+    t.equal('a remembered caret survives the Omnibar', cached._id, 'intro');
+    const preview = await previewRem2TexConvert(plugin, { kind: 'paper' });
+    t.check('so the paper resolves and the export is not blocked', !preview.blocked, JSON.stringify(preview.issues));
+    t.equal('and it names the paper, not the document', preview.targetTitle, 'A Sample Paper');
+
+    // (c) a stale caret from somewhere the author has navigated away from is NOT used
+    const elsewhere = kb.mk('elsewhere', ['Another document entirely'], null);
+    kb.mk('elsewhereChild', ['a rem over there'], elsewhere._id);
+    await plugin.storage.setSession(REM2TEX_FOCUS_CACHE_KEY, { remId: 'elsewhereChild', capturedAt: Date.now() });
+    const guarded = await getFocusedParentRem(plugin);
+    t.equal('a caret outside the open pane is ignored', guarded._id, 'doc');
+
+    // (d) and an old one expires rather than lingering
+    await plugin.storage.setSession(REM2TEX_FOCUS_CACHE_KEY, { remId: 'intro', capturedAt: Date.now() - 10 * 60 * 1000 });
+    const expired = await getFocusedParentRem(plugin);
+    t.equal('an expired caret is ignored', expired._id, 'doc');
   }
 
   // Omitting pinRows must export without touching a single rem.
