@@ -186,15 +186,15 @@ It converts the selection with the ordinary body rules — headings, escaping, c
 ```
 \section{Results}
 
-The defect levels align with earlier work [1, 2], and the correction scheme [3] is unchanged.
+The results agree with earlier work [1] and follow the method described in [2].
 
 % ---------------- Bibliography ----------------
 
-[1] Audrius Alkauskas, Peter Broqvist, and Alfredo Pasquarello. "Defect Energy Levels in Density
-Functional Calculations". In: Physical Review Letters (July 2008). doi: 10.1103/PhysRevLett.101.046405.
+[1] Jane Smith, Wei Chen, and Maria Garcia. "A Sample Study of an Example Topic". In: Journal of
+Examples (July 2008). doi: 10.1000/example.2008.
 
-[2] R M Martin. "Electronic structure: Basic theory and practical methods". In: Cambridge University
-Press (2020). url: https://books.google.com.au/books?id=dmRTFLpSGNsC.
+[2] A N Other. "An Example Book: Basic Theory and Practical Methods". In: Example University Press
+(2020). url: https://example.org/books/example-book.
 ```
 
 Where the export lands depends on what you selected: **one rem** → the export is a child of that rem;
@@ -249,7 +249,7 @@ happened to, then whatever content was left out, then where that rem lives:
 ```
 - Skipped by the todo mode, which also removed 1 non-todo descendant rem(s) from the paper.
     rem:  Todo "Todo1"
-    at:   Introduction > Nitride semiconductors have emerged as a …
+    at:   Introduction > Earlier work on this question has led to …
     now missing from the paper:
       · "indented below without todo."
 ```
@@ -276,12 +276,12 @@ export rem with the log in it.
   "unfinished only" mode); the log warns when that loses non-todo content.
 - **Citation keys** are the item doc's title with whitespace removed and only the characters that
   would break a `\cite{}` argument stripped (`\ { } , % # & ~ ^`) — so a key containing `$` or `.`,
-  like `wangFourelectronNegative$U$Vacancy2023`, is cited exactly as you wrote it. Duplicate keys merge.
+  like `doeExample$x$Study2023`, is cited exactly as you wrote it. Duplicate keys merge.
 - **`Rem2Tex-ignore` must be the top-level rem** with exactly that name (the toggle command creates it
   there); a same-named rem nested elsewhere is not recognised.
 - **Remnote's own bold/italic/underline are not converted** — type the LaTeX you want.
 - **A heading you already wrote as a command is left alone.** If a heading rem's text is literally
-  `\subsection{Chemical Potentials}`, that is what you get — not `\subsection{\subsection{…}}`.
+  `\subsection{Further Results}`, that is what you get — not `\subsection{\subsection{…}}`.
   Heading depth otherwise comes from outline nesting (a sister of `Preamble` is a `\section`, its
   heading children are `\subsection`s), and the log warns if the command you typed sits at a
   different depth than the outline implies.

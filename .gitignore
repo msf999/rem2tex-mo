@@ -6,8 +6,12 @@ dist-ssr
 *.zip
 TODO.txt
 
-# Cross-machine dev log / working notes — kept local, not committed (mo, 2026-09-02).
+# Project guide (CLAUDE.md), its dated work log (LOG.md) and to-do list (REMINDERS.md) — kept
+# local, not committed (2026-09-02 and 2026-11-05). The last two are anchored to the root
+# because their names are generic.
 CLAUDE.md
+/LOG.md
+/REMINDERS.md
 
 # Live-test rig: drives the real plugin in the real app through Chrome DevTools. Local only,
 # like CLAUDE.md — it carries a source patch (live-test/hook.js) that must never ship.

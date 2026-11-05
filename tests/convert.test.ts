@@ -332,9 +332,9 @@ export async function run(): Promise<number> {
       converted.captured.latex,
       texWithoutRewrite
     );
-    // The key is written as a REM REFERENCE to the item doc (mo's own citing style), not as literal
-    // text, so the rem must now hold: a typed `\\cite{`, a plain reference to the item, and the
-    // original pin still beside it.
+    // The key is written as a REM REFERENCE to the item doc (the way citations are typed by hand),
+    // not as literal text, so the rem must now hold: a typed `\\cite{`, a plain reference to the
+    // item, and the original pin still beside it.
     const p1 = converted.rems['p1'].text as any[];
     t.check(
       'the rem now holds a typed \\cite{ … }',
@@ -538,7 +538,7 @@ export async function run(): Promise<number> {
     t.equal('with no remembered caret it falls back to the open pane', noCache._id, 'doc');
     const blocked = await previewRem2TexConvert(plugin, { kind: 'paper' });
     t.check(
-      'which is exactly the "not a paper" failure mo hit',
+      'which is exactly the reported "not a paper" failure',
       blocked.blocked && blocked.issues.some((i) => /Preamble/.test(i.message)),
       JSON.stringify(blocked.issues)
     );

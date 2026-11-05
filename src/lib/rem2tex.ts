@@ -6,11 +6,11 @@ const HEADING_COMMANDS = ['section', 'subsection', 'subsubsection', 'paragraph',
 
 /**
  * The sectioning command a heading's title ALREADY is, when the author typed the whole thing
- * themselves (`\subsection{Chemical Potentials}`), or undefined when it is ordinary prose.
+ * themselves (`\subsection{Further Results}`), or undefined when it is ordinary prose.
  *
- * Wrapping such a title again produced `\subsection{\subsection{…}}`, which LaTeX cannot typeset —
- * five of them in mo's real paper (2026-10-12). The whole title must be the one command, so prose
- * that merely mentions a command, or text after the closing brace, is NOT treated as one.
+ * Wrapping such a title again produced `\subsection{\subsection{…}}`, which LaTeX cannot typeset
+ * (seen in a real export, 2026-10-12). The whole title must be the one command, so prose that
+ * merely mentions a command, or text after the closing brace, is NOT treated as one.
  */
 function typedSectioningCommand(title: string): { command: string; level: number } | undefined {
   const trimmed = title.trim();
@@ -142,8 +142,7 @@ const GENERIC_ERROR_HINTS = [
  * One warning, with the REASON separated from the quoted content and the outline path.
  *
  * These used to be one flat sentence per warning, which put the reason in the middle of a wall of
- * quoted titles and a long path (mo, 2026-10-09: *"can you make the warnings seperate the quoted
- * text and the readon for the warning so it is easier to read?"*). Both renderers — the Log code
+ * quoted titles and a long path, and was hard to read (2026-10-09). Both renderers — the Log code
  * block and the popup callout — lay the parts out themselves, so the split has to live here.
  */
 /**
@@ -821,14 +820,13 @@ function toLatexCitation(referenceText: string): string {
   if (/^\\cite\{.+\}$/.test(trimmed)) return trimmed;
 
   // A DENYLIST, not an allowlist: strip only what genuinely breaks a `\cite{}` argument, and keep
-  // everything else. The old allowlist (`[A-Za-z0-9:_-]`) silently mangled real citekeys — mo's
-  // library has seven, six of them containing `$` (`wangFourelectronNegative$U$Vacancy2023`) and one
-  // a `.` (`s.lambertFormationIntrinsicSilicon2017`). Those cite fine in LaTeX (mo, 2026-10-12:
-  // *"I have the key in my bib as wangFourelectronNegative$U$Vacancy2023, seems to work fine"*),
-  // because `\cite` does not typeset its argument — it writes the key to the `.aux` for biber. What
-  // is removed would really break things: `,` splits one key into two bogus ones, `{}` unbalance the
-  // argument, `\` starts a command, `%` comments out the rest of the line, and `#`, `&`, `~`, `^`
-  // are special wherever the key does get typeset (a failed citation prints it).
+  // everything else. The old allowlist (`[A-Za-z0-9:_-]`) silently mangled real citekeys — ones
+  // containing `$` (`doeExample$x$Study2023`, from maths in a title) or a `.`
+  // (`j.doeSampleStudy2017`). Those cite fine in LaTeX, because `\cite` does not typeset its
+  // argument — it writes the key to the `.aux` for biber. What is removed would really break
+  // things: `,` splits one key into two bogus ones, `{}` unbalance the argument, `\` starts a
+  // command, `%` comments out the rest of the line, and `#`, `&`, `~`, `^` are special wherever the
+  // key does get typeset (a failed citation prints it).
   const citationKey = trimmed
     .replace(/\s+/g, '')
     .replace(/[\\{},%#&~^]/g, '');
@@ -1820,8 +1818,8 @@ function stripEmptyCitationCommands(text: string): string {
   if (!text.includes('{')) return text;
   const names = [...CITATION_WRAPPER_COMMANDS, ...REFERENCE_WRAPPER_COMMANDS].join('|');
   // An argument holding no KEYS: empty, whitespace, or nothing but separators. Two pins in one
-  // `\cite{}` leave `{, }` rather than `{}` once the references are ignored (seen in mo's real
-  // paper, 2026-10-09), so commas count as empty too.
+  // `\cite{}` leave `{, }` rather than `{}` once the references are ignored (seen in a real
+  // export, 2026-10-09), so commas count as empty too.
   return text
     .replace(new RegExp(`\\\\(?:${names})\\*?(?:\\[[^\\]]*\\])*\\{[\\s,]*\\}`, 'g'), '')
     .replace(/\s+/g, ' ')
@@ -3054,7 +3052,7 @@ async function readZoteroItemMetadata(
   };
 }
 
-/** True when nothing citable was read — the case mo asked to be called out in the bibliography. */
+/** True when nothing citable was read — the only case the bibliography flags as missing metadata. */
 function isEmptyBibliographyEntry(entry: Rem2TexBibliographyEntry): boolean {
   return (
     entry.title.length === 0 &&
@@ -3197,7 +3195,7 @@ function formatBibliographyEntry(number: number, entry: Rem2TexBibliographyEntry
     builder.setunit(' ');
     builder.emit(`(${escapeLatex(date)})`);
   }
-  // An item with no DOI falls back to its URL, which is the only locator it has (mo, 2026-09-17).
+  // An item with no DOI falls back to its URL, which is the only locator it has (2026-09-17).
   // Neither goes through `escapeLatex`, which would read a `\` or `$` in an address as LaTeX; the
   // plain escaper keeps the literal intact while still making `_`, `%` and `&` compile.
   if (entry.doi) {
@@ -3212,7 +3210,7 @@ function formatBibliographyEntry(number: number, entry: Rem2TexBibliographyEntry
 
 /**
  * The whole block appended under the body: a comment heading, then one blank-line-separated entry.
- * Entries are PLAIN text, not LaTeX markup (mo, 2026-09-17): straight quotes, an unstyled journal
+ * Entries are PLAIN text, not LaTeX markup (2026-09-17): straight quotes, an unstyled journal
  * name and a lowercase `doi:` / `url:`, so the block reads as written rather than as source.
  */
 function formatBibliography(entries: Rem2TexBibliographyEntry[]): string {
@@ -3771,7 +3769,7 @@ export type Rem2TexCiteTarget = { itemDocId: string; key: string };
  *
  * The invariant it establishes: **every Zotero pin ends up INSIDE a citation command's braces,
  * immediately after a reference to its item doc** — `\cite{⟨ref⟩⟨pin⟩, ⟨ref⟩⟨pin⟩}`. The citekey is
- * a rem reference, not plain text, because that is how mo already cites by hand: it renders as the
+ * a rem reference, not plain text, matching how citations are typed by hand: it renders as the
  * key and stays clickable. Keeping each pin beside its own key is what makes a multi-work citation
  * readable — trailing pins after the `}` say nothing about which pin belongs to which paper.
  *
@@ -4171,10 +4169,9 @@ async function createOutputRem(
   await outputRem.setText([outputTitle]);
   await outputRem.setParent(rem2TexRoot);
 
-  // The document goes straight under the timestamp rem, with no `Paper` wrapper (mo, 2026-10-12:
-  // *"the exported block should go immediatly under Rem2Tex 04:20 PM 12-10-2026"*). The pair is
-  // still easy to tell apart — which is why the wrapper existed in the first place — because the
-  // bare code block is the paper and the titled one is the Log.
+  // The document goes straight under the timestamp rem, with no `Paper` wrapper (2026-10-12). The
+  // pair is still easy to tell apart — which is why the wrapper existed in the first place —
+  // because the bare code block is the paper and the titled one is the Log.
   if (latex !== undefined) {
     const codeRem = await plugin.rem.createRem();
     if (!codeRem) {
@@ -4183,8 +4180,8 @@ async function createOutputRem(
     await codeRem.setParent(outputRem);
     await codeRem.setText(await plugin.richText.code(latex, 'latex').value());
   }
-  // Collapsed, so the export reads as the document plus a folded Log rather than a wall of log text
-  // (mo, 2026-10-12).
+  // Collapsed, so the export reads as the document plus a folded Log rather than a wall of log
+  // text (2026-10-12).
   await createTitledCodeBlockRem(plugin, outputRem, LOG_REM_TITLE, logText, LOG_CODE_LANGUAGE, {
     collapsed: true,
   });
@@ -4421,7 +4418,7 @@ const REWRITE_RECORD_TITLE_PREFIX = 'Rem2Tex rewrite';
 
 /**
  * Record the before/after of everything written, under the paper's `Rem2Tex` folder, so a rewrite is
- * never unrecoverable. (mo, 2026-10-08: record only — no undo command.)
+ * never unrecoverable. (Record only — there is no undo command, 2026-10-08.)
  */
 export async function writeCitekeyRewriteRecord(
   plugin: RNPlugin,

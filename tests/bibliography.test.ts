@@ -110,12 +110,12 @@ export async function run(): Promise<number> {
   mk('pubs', ['Publications'], 'z');
 
   // Remzot's lookup rems: authors are named "Last, First"; date parts are their own rems.
-  mk('a-alk', ['Alkauskas, Audrius'], 'authors');
-  mk('a-bro', ['Broqvist, Peter'], 'authors');
-  mk('a-pas', ['Pasquarello, Alfredo'], 'authors');
-  mk('a-arr', ['Arrigoni, Marco'], 'authors');
-  mk('a-mad', ['Madsen, Georg K. H.'], 'authors');
-  mk('a-azu', ['Azuhata, T.'], 'authors');
+  mk('a-smi', ['Smith, Jane'], 'authors');
+  mk('a-che', ['Chen, Wei'], 'authors');
+  mk('a-gar', ['Garcia, Maria'], 'authors');
+  mk('a-doe', ['Doe, John'], 'authors');
+  mk('a-roe', ['Roe, Richard K. H.'], 'authors');
+  mk('a-fir', ['First, T.'], 'authors');
   mk('a-two', ['Second, A.'], 'authors');
   mk('a-three', ['Third, B.'], 'authors');
   mk('a-four', ['Fourth, C.'], 'authors');
@@ -124,33 +124,33 @@ export async function run(): Promise<number> {
   mk('y1995', ['1995'], 'dates');
   mk('m03', ['03'], 'dates');
   mk('y2021', ['2021'], 'dates');
-  mk('p-prl', ['Physical Review Letters'], 'pubs');
-  mk('p-jpcm', ['Journal of Physics: Condensed Matter'], 'pubs');
+  mk('p-joe', ['Journal of Examples'], 'pubs');
+  mk('p-esb', ['Example Studies: Series B'], 'pubs');
 
   // Three synced item docs and one hand-added, property-less one.
-  const alkauskas = mk('alk2008', ['alkauskasDefectEnergy2008'], 'items');
-  await alkauskas.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'title', [
-    'Defect Energy Levels in Density Functional Calculations: Alignment and Band Gap Problem',
+  const threeAuthors = mk('smi2008', ['smithSampleStudy2008'], 'items');
+  await threeAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'title', [
+    'A Sample Study of an Example Topic: Methods and Results',
   ]);
-  await alkauskas.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'authors', authorsSlot('a-alk', 'a-bro', 'a-pas'));
-  await alkauskas.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'publication', [ref('p-prl')]);
-  await alkauskas.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'year', dateSlot('y2008', 'm07'));
-  await alkauskas.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'doi', ['10.1103/PhysRevLett.101.046405']);
+  await threeAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'authors', authorsSlot('a-smi', 'a-che', 'a-gar'));
+  await threeAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'publication', [ref('p-joe')]);
+  await threeAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'year', dateSlot('y2008', 'm07'));
+  await threeAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'doi', ['10.1000/example.2008']);
 
-  const arrigoni = mk('arr2021', ['arrigoniSpinney2021'], 'items');
-  await arrigoni.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'title', ['Spinney: Post-Processing of Calculations']);
-  await arrigoni.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'authors', authorsSlot('a-arr', 'a-mad'));
-  await arrigoni.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'year', dateSlot('y2021'));
+  const twoAuthors = mk('doe2021', ['doeToolkit2021'], 'items');
+  await twoAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'title', ['Toolkit: A Program for Example Analyses']);
+  await twoAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'authors', authorsSlot('a-doe', 'a-roe'));
+  await twoAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'year', dateSlot('y2021'));
 
-  const azuhata = mk('azu1995', ['azuhataPolarized1995'], 'items');
-  await azuhata.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'title', ['Polarized Raman Spectra in GaN']);
-  await azuhata.setPowerupProperty(
+  const fourAuthors = mk('fir1995', ['firstMeasurements1995'], 'items');
+  await fourAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'title', ['Measurements on a Sample Material']);
+  await fourAuthors.setPowerupProperty(
     ZOTERO_ITEM_POWERUP,
     'authors',
-    authorsSlot('a-azu', 'a-two', 'a-three', 'a-four')
+    authorsSlot('a-fir', 'a-two', 'a-three', 'a-four')
   );
-  await azuhata.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'publication', [ref('p-jpcm')]);
-  await azuhata.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'year', dateSlot('y1995', 'm03'));
+  await fourAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'publication', [ref('p-esb')]);
+  await fourAuthors.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'year', dateSlot('y1995', 'm03'));
 
   mk('bare2020', ['bareItem2020'], 'items'); // hand-added: under Items, but no properties at all
 
@@ -164,7 +164,7 @@ export async function run(): Promise<number> {
   await linkRem.setPowerupProperty('b', 'URL', ['https://example.org/paper-a?x=1']);
   const linked = mk('link2016', ['linkedItem2016'], 'items');
   await linked.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'title', ['An Item With Only A Link']);
-  await linked.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'authors', authorsSlot('a-arr'));
+  await linked.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'authors', authorsSlot('a-doe'));
   await linked.setPowerupProperty(ZOTERO_ITEM_POWERUP, 'link', [ref('linkrem')]);
 
   // A title that already ends a sentence must never take a second period (biblatex's \\isdot).
@@ -196,20 +196,20 @@ export async function run(): Promise<number> {
   };
   prop(['A Walked Title']);
   prop([ref('t-book')]);          // Type — must be ignored, not read as the URL
-  prop(authorsSlot('a-arr'));     // Authors
+  prop(authorsSlot('a-doe'));     // Authors
   prop([ref('walkLink')]);        // Link(s)
 
   // ---------------------------------------------------------------- one rem, exported
   mk('doc', ['Section'], null);
-  mk('p1', ['Prose citing ', pin('alk2008'), ' and ', pin('arr2021'), '.'], 'doc');
-  mk('p2', ['Again ', pin('alk2008'), ', plus \\cite{bareItem2020} and \\cite{unknownKey2019}.'], 'doc');
-  mk('p3', ['Four authors: ', pin('azu1995'), '.'], 'doc');
+  mk('p1', ['Prose citing ', pin('smi2008'), ' and ', pin('doe2021'), '.'], 'doc');
+  mk('p2', ['Again ', pin('smi2008'), ', plus \\cite{bareItem2020} and \\cite{unknownKey2019}.'], 'doc');
+  mk('p3', ['Four authors: ', pin('fir1995'), '.'], 'doc');
   mk('p4', ['DOI only: ', pin('doi2015'), '.'], 'doc');
   mk('p5', ['Question title ', pin('q2019'), ' and dotted ', pin('d2018'), '.'], 'doc');
   mk('p6', ['Hand-typed \\cite{smith_2020}.'], 'doc');
   mk('p7', ['Link only: ', pin('link2016'), '.'], 'doc');
   mk('p8', ['Child-walk only: ', pin('walk2014'), '.'], 'doc');
-  mk('t1', ['read ', pin('alk2008')], 'doc', todo);
+  mk('t1', ['read ', pin('smi2008')], 'doc', todo);
 
   const single = await runSelectionToTexConversion(plugin, { selectedRemIds: ['doc'] });
   const latex = captured.latex;
@@ -247,24 +247,23 @@ export async function run(): Promise<number> {
   t.check(
     'entry 1 reproduces the biblatex numeric shape',
     latex.includes(
-      '[1] Audrius Alkauskas, Peter Broqvist, and Alfredo Pasquarello. "Defect Energy Levels in ' +
-        'Density Functional Calculations: Alignment and Band Gap Problem". In: Physical ' +
-        'Review Letters (July 2008). doi: 10.1103/PhysRevLett.101.046405.'
+      '[1] Jane Smith, Wei Chen, and Maria Garcia. "A Sample Study of an Example Topic: Methods ' +
+        'and Results". In: Journal of Examples (July 2008). doi: 10.1000/example.2008.'
     ),
     latex
   );
   t.check(
     'two authors join with "and"; a missing journal and DOI just drop out',
     latex.includes(
-      '[2] Marco Arrigoni and Georg K. H. Madsen. "Spinney: Post-Processing of Calculations" (2021).'
+      '[2] John Doe and Richard K. H. Roe. "Toolkit: A Program for Example Analyses" (2021).'
     ),
     latex
   );
   t.check(
     'more than three authors truncate to "et al." with no doubled period',
     latex.includes(
-      '[5] T. Azuhata et al. "Polarized Raman Spectra in GaN". In: Journal of Physics: ' +
-        'Condensed Matter (Mar. 1995).'
+      '[5] T. First et al. "Measurements on a Sample Material". In: Example Studies: Series B ' +
+        '(Mar. 1995).'
     ),
     latex
   );
@@ -302,12 +301,12 @@ export async function run(): Promise<number> {
   );
   t.check(
     'an item with no DOI but a link prints its real URL, not the link rem\'s prettified text',
-    latex.includes('Marco Arrigoni. "An Item With Only A Link". url: https://example.org/paper-a?x=1.'),
+    latex.includes('John Doe. "An Item With Only A Link". url: https://example.org/paper-a?x=1.'),
     latex
   );
   t.check(
     'the child-walk route reads a doc with no powerup, and files Type as Type, not as the URL',
-    latex.includes('Marco Arrigoni. "A Walked Title". url: https://walk.example/paper-b.'),
+    latex.includes('John Doe. "A Walked Title". url: https://walk.example/paper-b.'),
     latex
   );
   t.check('the bibliography is introduced by a comment heading', latex.includes('% ---------------- Bibliography ----------------'), latex);

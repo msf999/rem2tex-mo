@@ -103,8 +103,8 @@ export async function run(): Promise<number> {
   t.check(`paragraph export returns a timestamped title (${title})`, /^Rem2Tex paragraph \d\d:\d\d [AP]M \d\d-\d\d-\d{4}$/.test(title));
 
   // Citekeys keep every character that is legal in a `\cite{}` argument. The old allowlist
-  // (`[A-Za-z0-9:_-]`) mangled seven real keys in mo's library — six with `$`, one with `.` — into
-  // keys that matched nothing in the .bib, silently (2026-10-12).
+  // (`[A-Za-z0-9:_-]`) mangled real keys containing `$` or `.` into keys that matched nothing in
+  // the .bib, silently (2026-10-12).
   {
     const kb = createFakeKb();
     const { mk, plugin } = kb;
@@ -120,9 +120,9 @@ export async function run(): Promise<number> {
     };
 
     const keep: Array<[string, string, string]> = [
-      ['a $ in a citekey survives', 'wangFourelectronNegative$U$Vacancy2023', 'See \\cite{wangFourelectronNegative$U$Vacancy2023}.'],
-      ['subscript braces-free $_2$ survives', 'turanElectronicStructureCaSnN$_2$2026', 'See \\cite{turanElectronicStructureCaSnN$_2$2026}.'],
-      ['a dot survives', 's.lambertFormationIntrinsicSilicon2017', 'See \\cite{s.lambertFormationIntrinsicSilicon2017}.'],
+      ['a $ in a citekey survives', 'doeExample$x$Study2023', 'See \\cite{doeExample$x$Study2023}.'],
+      ['subscript braces-free $_2$ survives', 'roeSample$_2$Model2026', 'See \\cite{roeSample$_2$Model2026}.'],
+      ['a dot survives', 'j.doeSampleStudy2017', 'See \\cite{j.doeSampleStudy2017}.'],
       ['a plain key is unchanged', 'smith2020', 'See \\cite{smith2020}.'],
       ['colons, underscores and hyphens still survive', 'a:b_c-d2020', 'See \\cite{a:b_c-d2020}.'],
     ];

@@ -192,7 +192,7 @@ function Rem2TexConvertPopup() {
           {preview.issues.map((issue, index) => (
             // The REASON is its own line; the rem, the quoted content and the path sit under it in
             // calmer type. One flat sentence per warning buried the reason between a wall of quoted
-            // titles and a very long outline path (mo, 2026-10-09).
+            // titles and a very long outline path (2026-10-09).
             <div
               key={index}
               className="text-sm flex flex-col"

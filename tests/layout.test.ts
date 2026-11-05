@@ -30,8 +30,8 @@ export async function run(): Promise<number> {
     const exportRem: any = Object.values(rems).find((r: any) => typeof r.text[0] === 'string' && r.text[0].startsWith('Rem2Tex ') && rems[r.parent]?.text[0] === 'Rem2Tex');
     const folder: any = exportRem && rems[exportRem.parent];
     const kids: any[] = Object.values(rems).filter((r: any) => r.parent === exportRem?._id);
-    // Since 2026-10-12 the LaTeX block is a DIRECT child of the timestamp rem — no `Paper` wrapper
-    // (mo). The Log keeps its title, which is what still tells the two apart.
+    // Since 2026-10-12 the LaTeX block is a DIRECT child of the timestamp rem — no `Paper` wrapper.
+    // The Log keeps its title, which is what still tells the two apart.
     const latexCode = kids.find((r: any) => r.text?.[0]?.language === 'latex');
     const logRem = kids.find((r: any) => r.text[0] === 'Log');
     const logCode: any = Object.values(rems).find((r: any) => r.parent === logRem?._id);
@@ -43,7 +43,7 @@ export async function run(): Promise<number> {
     t.check('and there is no "Paper" wrapper rem any more',
       !kids.some((r: any) => r.text[0] === 'Paper'),
       JSON.stringify(kids.map((k: any) => k.text?.[0]?.language || k.text[0])));
-    // The Log is folded away by default; the document itself is not (mo, 2026-10-12).
+    // The Log is folded away by default; the document itself is not (2026-10-12).
     t.check('the Log rem is created collapsed', logRem?.collapsed === true, JSON.stringify({ log: logRem?.collapsed }));
     t.check('and the latex block is left expanded', latexCode?.collapsed !== true, JSON.stringify({ latex: latexCode?.collapsed }));
   }
@@ -183,7 +183,7 @@ export async function run(): Promise<number> {
       && /Skipped by the todo mode, which also removed 1 non-todo descendant rem\(s\)/.test(captured.log),
     JSON.stringify(res8) + '\n' + captured.log);
   // Each warning puts its REASON on its own line and the quoted content underneath, rather than
-  // running them together (mo, 2026-10-09).
+  // running them together (2026-10-09).
   t.check('a warning separates its reason, its rem, its quotes and its path',
     /- Only the figure\/table code blocks under an image rem are exported, so this rem’s own text was left out\.\n    rem:  Image rem "/.test(captured.log)
       && /\n    left out:\n      · "a caption typed as prose"/.test(captured.log)
@@ -266,7 +266,7 @@ export async function run(): Promise<number> {
     res12.status === 'success' && !captured.latex.includes('\\section') && /Headings: 0/.test(captured.log) && /This heading rem has no title/.test(captured.log) && captured.latex.includes('orphaned prose'),
     JSON.stringify(res12) + '\n' + captured.latex + '\n' + captured.log);
 
-  // 13. a warning's parts are cleaned up and kept apart (mo, 2026-10-09: the one-sentence format
+  // 13. a warning's parts are cleaned up and kept apart (2026-10-09: the one-sentence format
   // buried the reason between the quoted titles and a very long path).
   const p13 = mk('p13', ['Paper 13'], null);
   mk('p13z', ['Zotero'], null);
@@ -278,11 +278,11 @@ export async function run(): Promise<number> {
   const p13sec = mk('p13sec', ['Introduction'], 'p13', heading);
   // A very long prose ancestor: its path segment must be elided, not printed in full.
   const p13long = mk('p13long',
-    ['Nitride semiconductors have emerged as a promising class of materials for energy-related applications such as photocatalysis.'],
+    ['Earlier work on this question has led to two quite different conclusions about its cause.'],
     'p13sec');
   // A todo whose title cites TWO works by pin. The raw title ignores references, so the title used
   // to keep an argument-less `\cite{, }` — artefact, not content.
-  const p13todo = mk('p13todo', ['Judy: relate this back \\cite{', pin('p13A'), pin('p13B'), '}'], p13long._id, todo);
+  const p13todo = mk('p13todo', ['note: relate this back \\cite{', pin('p13A'), pin('p13B'), '}'], p13long._id, todo);
   // A search-portal child, which used to be quoted literally as "query:".
   mk('p13q', ['query:'], p13todo._id);
   mk('p13end', ['End'], 'p13');
@@ -305,10 +305,10 @@ export async function run(): Promise<number> {
     !/"query:"/.test(warn13) && /· "\(untitled\)"/.test(warn13),
     warn13);
   t.check('a long path segment is elided rather than printed in full',
-    /at:   Introduction > Nitride semiconductors have emerged as a …$/m.test(warn13),
+    /at:   Introduction > Earlier work on this question has led to …$/m.test(warn13),
     warn13);
   t.check('the path does not repeat the rem the warning already named',
-    !/at:   [^\n]*Judy: relate this back/.test(warn13),
+    !/at:   [^\n]*note: relate this back/.test(warn13),
     warn13);
 
   // 14. A reference whose target was deleted. RemNote keeps the breadcrumb, so a Zotero citation is
@@ -347,7 +347,7 @@ export async function run(): Promise<number> {
   mk('p15pre', ['Preamble'], 'p15');
   mk('p15pre1', [code('P')], 'p15pre');
   const si = mk('p15si', ['Supplementary'], 'p15', heading);           // level 1 -> \section
-  mk('p15match', ['\\subsection{Chemical Potentials}'], si._id, heading);   // level 2 -> matches
+  mk('p15match', ['\\subsection{Further Results}'], si._id, heading);       // level 2 -> matches
   mk('p15mismatch', ['\\paragraph{Too deep}'], si._id, heading);            // level 2 -> mismatch
   mk('p15plain', ['Ordinary Heading'], si._id, heading);                      // untouched
   mk('p15star', ['\\subsection*{Starred}'], si._id, heading);               // starred form counts
@@ -359,7 +359,7 @@ export async function run(): Promise<number> {
   const res15 = await runRem2TexConversion(plugin, { parentRem: p15 });
 
   t.check('a typed \\subsection{} at the matching depth is emitted once, not doubled',
-    captured.latex.includes('\\subsection{Chemical Potentials}')
+    captured.latex.includes('\\subsection{Further Results}')
       && !/\\subsection\{\\subsection/.test(captured.latex), captured.latex);
   t.check('a starred form is recognised too', captured.latex.includes('\\subsection*{Starred}'), captured.latex);
   t.check('an ordinary heading is still wrapped', captured.latex.includes('\\subsection{Ordinary Heading}'), captured.latex);
