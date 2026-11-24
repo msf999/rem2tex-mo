@@ -44,6 +44,7 @@ Paper (any name)
 │  └─ We study …                    prose → escaped paragraph
 ├─ Introduction                  ← heading
 │  ├─ As shown ⟨pin → Zotero/Items/smith2020⟩ …    pin → \cite{smith2020}
+│  ├─ See Figure~\ref{⟨pin → the figure⟩}.         pin inside \ref → \ref{fig:setup}
 │  ├─ % reviewer 2 asked for more context here     ← % rem → comment line
 │  └─ ☐ add the missing numbers                    ← todo → % TODO [ ] add the …
 ├─ Results
@@ -100,6 +101,7 @@ offered for papers only; Paragraph and Selection always comment every todo.
 | Math element | `$…$`, or `$$…$$` when marked as block |
 | Image rem | only the `\begin{figure}` / `\begin{table}` code block you put underneath it; the image, its own caption text and any other children are dropped (the log says which), and with no such block you get a visible `REM2TEX WARNING` box |
 | Pin or reference into `Zotero / Items` | `\cite{<citekey>}` — the item doc's title is the key |
+| Pin inside a `\ref{…}` you typed (or `\cref`, `\eqref`, …) | the `\label` of the rem it points at — see [References to figures, tables and sections](#references-to-figures-tables-and-sections) |
 | Any other pin | dropped from prose, so pin freely for navigation; inline (non-pin) references keep their visible text |
 | Todo | `% TODO [ ] …` / `% TODO [X] …`, with its subtree as indented `%` lines (one space per level) |
 | Rem starting with `%` | a comment line with its subtree, in every todo mode — as in LaTeX, `%5 of samples` is a comment, so write `\%5` for prose |
@@ -110,8 +112,8 @@ items you added there by hand count too, and a pin to a note nested inside an it
 
 > [!TIP]
 > Cite by pinning the item, inside a typed `\cite{…}` if you like: typed commands are never doubled
-> and adjacent citations merge into `\cite{a, b}`. Rem2Tex never generates `\ref{}` — type
-> `\ref{fig:setup}` yourself, and a pin inside `\ref{…}` is dropped like any other pin.
+> and adjacent citations merge into `\cite{a, b}`. Refer to a figure the same way, with a pin
+> inside a typed `\ref{…}` — see [below](#references-to-figures-tables-and-sections).
 
 ---
 
@@ -163,6 +165,55 @@ Every converted rem is recorded under **`Rem2Tex rewrite <timestamp>`**, holding
 text before and after — so you can see exactly what changed, and put it back by hand if you want to.
 If you edit one of the listed rems between opening the preview and pressing Convert, that rem is
 skipped rather than overwritten.
+
+---
+
+## References to figures, tables and sections
+
+Pin what you are referring to inside the braces of a `\ref{…}` you type — the same move as citing:
+
+```
+in Remnote    As Figure~\ref{⟨pin → the figure's code block⟩} shows, the signal doubles.
+LaTeX         As Figure~\ref{fig:setup} shows, the signal doubles.
+```
+
+Rem2Tex fills in the `\label` of the rem the pin points at, so you never type a label, and changing a
+label in its figure changes every pinned reference to it at the next export. This works in all three
+exports and with every reference command: `\ref`, `\eqref`, `\pageref`, `\autoref`, `\nameref`,
+`\vref`, `\cref`/`\Cref` (one pin per item of the list) and `\crefrange`/`\Crefrange` (one pin per
+argument). An inline reference works the same as a pin.
+
+| The pin points at | The label used |
+| --- | --- |
+| a code block — a figure, a table, an equation | its last `\label` (subfigures label each panel first and the whole figure last) |
+| an image rem | the label in the figure or table block under it |
+| a rem whose own text or maths holds a `\label{…}` | that label |
+| a heading | a `\label{…}` typed into its title; otherwise `\label{sec:<its title>}`, which Rem2Tex adds right after that heading's sectioning command — `\section{Sample Preparation}\label{sec:sample-preparation}` |
+
+Only a pin that has the braces to itself — or, in a `\cref` list, its own item — is filled in.
+Anything else keeps the old behaviour, the pin is left out and the `\ref{}` stays empty, and the log
+says why: the pin points at a rem with no label, shares its braces with other text, or points at a
+Zotero item (cite that with `\cite{…}` instead). A heading gets a label only when a pin points at
+it, so the headings you never refer to export exactly as before.
+
+### The reference check
+
+Every **paper** export also checks each reference, pinned or typed, against the labels the paper
+defines — in the body, its headings and figure blocks, and the `Preamble` and `End` blocks, but never
+in a `%` comment — and warns about:
+
+- a reference to a label nothing in the paper defines, such as a typo or a deleted figure — the PDF
+  would print **??** in its place;
+- an empty reference, `\ref{}`;
+- a label defined twice;
+- a figure or table that nothing refers to (a figure counts as referenced when any of its labels is).
+
+These are warnings only. They appear at the top of the preview and in the log, the export always goes
+ahead, and the LaTeX is never changed. The log's Conversion section counts what it saw, e.g.
+`Cross-references: 8 reference(s) to 6 label(s), 7 label(s) defined, 7 filled in from a pin, 2 heading
+label(s) added`. Paragraph and Selection exports fill pins in but skip the check, because the labels
+they refer to usually live elsewhere in the paper. A reference made inside a macro of your own (a
+`\newcommand` that calls `\ref{#1}`) is resolved by TeX, not by Rem2Tex, so it is not checked.
 
 ---
 
@@ -238,7 +289,7 @@ paper rem and
 toasts one line — exported, exported with *n* warnings, or failed, read the log. The log is plain
 text: **Setup** (command, todo mode, paper rem) · **Structure** (where `Preamble` and `End` sit, which
 body rems were converted, what was ignored) · **Conversion** (block sizes, `\documentclass`, `\title`,
-`\author`) · **Conversion summary** (counts, citation keys, dropped pins, todo comments, skipped rems)
+`\author`, the cross-reference counts) · **Conversion summary** (counts, citation keys, dropped pins, todo comments, skipped rems)
 · **Skipped by Rem2Tex-ignore** · **Warnings** · **Result**
 (`SUCCESS` with the line count, or the failure with what happened, the rem, its path and suggestions).
 Copy it into a bug report when asking for help.

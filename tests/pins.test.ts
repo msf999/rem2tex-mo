@@ -43,7 +43,8 @@ export async function run(): Promise<number> {
     ['pin to the Items doc itself → dropped', () => prose(['see ', pin('items'), '.']), 'see .'],
     ['pin to a local todo → dropped from prose', () => prose(['This matters', pin('todo1'), '.']), 'This matters.'],
     ['pin to a local figure → dropped from prose', () => prose(['as shown ', pin('fig1'), ' below']), 'as shown  below'],
-    ['\\ref{ + pin to figure + } → pin dropped, label must be typed', () => prose(['Fig. \\ref{', pin('fig1'), '}']), 'Fig. \\ref{}'],
+    // The flattener alone drops it; the EXPORT fills the label in first (tests/crossrefs.test.ts).
+    ['\\ref{ + pin to figure + } → the flattener drops the pin', () => prose(['Fig. \\ref{', pin('fig1'), '}']), 'Fig. \\ref{}'],
     ['pin to an unrelated note → dropped', () => prose(['see ', pin('concept'), '.']), 'see .'],
     ['inline reference to an unrelated note → its text', () => prose(['the ', ref('concept'), ' matters']), 'the shared concept matters'],
     ['pin to a bookkeeping (Status slot) rem → dropped', () => prose(['x', pin('statusSlot')]), 'x'],

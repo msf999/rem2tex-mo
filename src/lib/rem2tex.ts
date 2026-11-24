@@ -47,6 +47,11 @@ export type Rem2TexConversionContext = {
    * later, from the assembled document (see `renumberCitations`).
    */
   citationItemDocs?: Map<string, Rem>;
+  /**
+   * Cross-reference state: label pins and generated heading labels (every export), and — when
+   * `check` is set, i.e. for a paper — the labels and references the `\ref` check reads.
+   */
+  crossRefs?: Rem2TexCrossRefs;
 };
 
 /** Best-effort `\title`, `\author`, `\documentclass{…}` from raw preamble text (for the log). */
@@ -931,8 +936,9 @@ const CITATION_WRAPPER_COMMANDS = new Set([
 ]);
 
 /**
- * Reference commands. Nothing generates `\ref{}` from a pin any more (2026-09-03 design), so this
- * set only normalises a typed `\eqref{\ref{x}}`-style nesting.
+ * Reference commands. A pin alone inside one is filled in with its target's label
+ * (`substituteLabelPins`, 2026-11-24); the cross-reference check reads their keys; the citekey
+ * rewrite keeps out of their braces; and a typed `\eqref{\ref{x}}`-style nesting is normalised.
  */
 const REFERENCE_WRAPPER_COMMANDS = new Set([
   'ref',
@@ -2035,13 +2041,555 @@ async function emitTodoChildrenAsCommentTree(
   }
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * Cross-references (2026-11-24): label pins, and a check of every reference against the labels.
+ *
+ * 1. Label pins, in every export. A pin — or an inline reference — typed INSIDE a reference
+ *    command's braces is replaced by the `\label` of the rem it points at, so
+ *    `Figure~\ref{` + pin + `}` exports as `Figure~\ref{fig:x}`. It is opt-in by placement, exactly
+ *    like `\cite{` + pin + `}`: every other pin is still dropped (2026-09-03 design). The label is
+ *    read from the target's own code, then an image rem's figure/table blocks, then its own text and
+ *    maths; a HEADING without one gets a generated `\label{sec:<title>}`, written after its
+ *    sectioning command only because a pin points at it. A pin that cannot be filled in is left
+ *    out, as before (`\ref{}`), and the Log says why.
+ *    The April design resolved EVERY local pin and threw on a missing label; it failed more exports
+ *    than it helped and was removed on 2026-09-03. This one never fails an export — keep it so.
+ * 2. The check, paper exports only. Every `\label` and every reference the paper emits — body,
+ *    headings, figure blocks and both boundary blocks, never a `%` comment — is indexed with the rem
+ *    it came from. `reportCrossReferences` then warns about references to labels nothing defines,
+ *    empty references, labels defined twice, and figures or tables nothing refers to. Warnings
+ *    only: the output never changes.
+ * ---------------------------------------------------------------------------------------------- */
+
+export type Rem2TexCrossRefs = {
+  /** Paper exports: index what is emitted, for `reportCrossReferences`. */
+  check: boolean;
+  labels: Array<{ key: string; rem: Rem; subject: string; inFloat: boolean }>;
+  /** `subject` is set when the reference sits in a heading, figure, table or equation. */
+  refs: Array<{ key: string; command: string; rem: Rem; subject?: string }>;
+  /** Reference commands whose argument came out empty (`\ref{}`). */
+  emptyRefs: Array<{ command: string; rem: Rem; subject?: string }>;
+  /**
+   * `<rem id> <command>` for every pin that could not be filled in. It was warned about where it
+   * sits, so the check does not report what it left behind a second time.
+   */
+  unfilled: Set<string>;
+  /** References filled in from a pin. */
+  pinned: number;
+  /** The label generated for each heading a pin points at, by heading rem id. */
+  headingLabels: Map<string, string>;
+  /** Where each emitted heading's sectioning line sits, so a generated label can follow it. */
+  headingLines: Map<string, { output: string[]; index: number; rem: Rem }>;
+  /** Generated heading labels actually written into the output. */
+  headingLabelsAdded: number;
+};
+
+export function emptyCrossRefs(check: boolean): Rem2TexCrossRefs {
+  return {
+    check,
+    labels: [],
+    refs: [],
+    emptyRefs: [],
+    unfilled: new Set(),
+    pinned: 0,
+    headingLabels: new Map(),
+    headingLines: new Map(),
+    headingLabelsAdded: 0,
+  };
+}
+
+/** cleveref's commands that take a comma-separated LIST of labels; every other one takes one. */
+const LIST_REFERENCE_COMMANDS = new Set(['cref', 'Cref']);
+/** Range commands take two labels, `{first}{last}`. */
+const RANGE_REFERENCE_COMMANDS = new Set(['crefrange', 'Crefrange']);
+
+const FLOAT_ENVIRONMENT_PATTERN =
+  /\\begin\{(?:figure|table|sidewaysfigure|sidewaystable|wrapfigure|wraptable)\*?\}/;
+
+/** A generated heading label is `sec:` plus at most this many characters of the title. */
+const HEADING_LABEL_SLUG_MAX = 40;
+
+type ReferenceGroup = { command: string; open: number; close: number };
+
+/**
+ * Every label argument of every reference command in `text`, as the offsets of its `{` and of the
+ * matching `}`; a range command contributes two. It reads emitted LaTeX and a rich-text projection
+ * alike. `balanced` is false when some command's braces never close.
+ */
+function findReferenceGroups(text: string): { groups: ReferenceGroup[]; balanced: boolean } {
+  const groups: ReferenceGroup[] = [];
+  let balanced = true;
+  const pattern = /\\([A-Za-z]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const command = match[1];
+    if (!REFERENCE_WRAPPER_COMMANDS.has(command) || isEscaped(text, match.index)) continue;
+    let cursor = pattern.lastIndex;
+    if (text[cursor] === '*') cursor += 1;
+    const wanted = RANGE_REFERENCE_COMMANDS.has(command) ? 2 : 1;
+    for (let n = 0; n < wanted && text[cursor] === '{'; n += 1) {
+      const end = findMatchingGroup(text, cursor, '{', '}');
+      if (end === -1) {
+        balanced = false;
+        break;
+      }
+      groups.push({ command, open: cursor, close: end - 1 });
+      cursor = end;
+    }
+  }
+  return { groups, balanced };
+}
+
+/** The keys one reference argument names: a list for cleveref's list commands, else all of it. */
+function referenceKeysOf(command: string, argument: string): string[] {
+  const parts = LIST_REFERENCE_COMMANDS.has(command) ? argument.split(',') : [argument];
+  return parts.map((part) => part.trim()).filter((key) => key.length > 0);
+}
+
+/**
+ * Whether a key can be checked at all. A macro parameter (`\ref{#1}` inside a `\newcommand`) or a
+ * key built from other commands is resolved by TeX, not here: skip it rather than cry wolf.
+ */
+function isCheckableKey(key: string): boolean {
+  return !/[#\\{}]/.test(key);
+}
+
+/** How a reference is quoted back in a warning. */
+function quoteReference(command: string, key: string): string {
+  return command === 'hyperref' ? `\\hyperref[${key}]` : `\\${command}{${key}}`;
+}
+
+/** The `\label` keys in `code`, in order of appearance. */
+function labelKeysIn(code: string): string[] {
+  const keys: string[] = [];
+  for (const match of code.matchAll(/\\label\{([^{}]*)\}/g)) {
+    if (match.index !== undefined && isEscaped(code, match.index)) continue;
+    const key = match[1].trim();
+    if (key && isCheckableKey(key)) keys.push(key);
+  }
+  return keys;
+}
+
+/** Everything after an unescaped `%` dropped, line by line: a commented-out `\ref` is no reference. */
+function withoutLatexComments(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const at = firstCommentIndex(line);
+      return at === -1 ? line : line.slice(0, at);
+    })
+    .join('\n');
+}
+
+/** LaTeX the rem itself carries — its text, code and maths — never what its references point at. */
+function ownLatexText(richText: unknown): string {
+  if (!Array.isArray(richText)) return '';
+  return richText
+    .map((element) => {
+      if (typeof element === 'string') return element;
+      const entry = (element ?? {}) as Record<string, unknown>;
+      const own = entry.i === 'm' || entry.i === 'x' || entry.i === undefined;
+      return own && typeof entry.text === 'string' ? entry.text : '';
+    })
+    .join('');
+}
+
+/** `Figure "caption…"`, `Table "caption…"` or `Equation "…"` when `emitted` is one, else undefined. */
+function environmentSubject(emitted: string): string | undefined {
+  const elide = (text: string): string => {
+    const folded = text.replace(/\s+/g, ' ').trim();
+    return folded.length > 70 ? `${folded.slice(0, 69)}…` : folded;
+  };
+  const captionAt = emitted.search(/\\caption(?:\[[^\]]*\])?\{/);
+  if (captionAt !== -1) {
+    const open = emitted.indexOf('{', captionAt);
+    const end = findMatchingGroup(emitted, open, '{', '}');
+    if (end !== -1) {
+      const kind = /\\begin\{(?:sideways|wrap)?table/.test(emitted) ? 'Table' : 'Figure';
+      return `${kind} "${elide(emitted.slice(open + 1, end - 1))}"`;
+    }
+  }
+  const equation = /\\begin\{(equation|align|gather|multline|eqnarray)(\*?)\}([\s\S]*?)\\end\{\1\2\}/.exec(emitted);
+  if (equation) {
+    const body = elide(equation[3].replace(/\\label\{[^{}]*\}/g, ''));
+    if (body) return `Equation "${body}"`;
+  }
+  return undefined;
+}
+
+/** What a warning calls the rem a label lives in: its figure, table or equation, else its title. */
+function crossRefSubject(rem: Rem, emitted: string): string {
+  const environment = environmentSubject(emitted);
+  if (environment) return environment;
+  const title = displayTitleForWarning(rem, WARNING_SUBJECT_MAX);
+  return title === '(untitled)' ? 'Rem' : `Rem "${title}"`;
+}
+
+/**
+ * A rem named by the text around `needle`, pins shown as ⟨pin⟩ and nothing stripped — the usual
+ * warning title drops an empty `\ref{}`, which is the very thing an empty-reference warning is about.
+ */
+function textAroundForWarning(rem: Rem, needle: string): string {
+  const folded = sanitizeDiagnosticExcerpt(buildDiagnosticRemTextPreview(rem.text)).replace(/\s+/g, ' ').trim();
+  if (!folded) return 'Rem';
+  const at = folded.indexOf(needle);
+  if (at === -1) {
+    return `Rem "${folded.length > WARNING_SUBJECT_MAX ? `${folded.slice(0, WARNING_SUBJECT_MAX - 1)}…` : folded}"`;
+  }
+  const start = Math.max(0, at - 50);
+  const end = Math.min(folded.length, at + needle.length + 30);
+  return `Rem "${start > 0 ? '…' : ''}${folded.slice(start, end).trim()}${end < folded.length ? '…' : ''}"`;
+}
+
+function headingSubject(rem: Rem): string {
+  const title = displayTitleForWarning(rem, WARNING_SUBJECT_MAX);
+  return title === '(untitled)' ? 'Heading' : `Heading "${title}"`;
+}
+
+/** The words around one pin, shown as ⟨pin⟩: a long paragraph is named by the pin's neighbourhood. */
+function pinContextForWarning(text: unknown[], index: number): string {
+  const mark = '\u0000';
+  const folded = sanitizeDiagnosticExcerpt(
+    buildDiagnosticRemTextPreview(text.map((element, i) => (i === index ? mark : element)))
+  ).replace(/\s+/g, ' ');
+  const at = folded.indexOf(mark);
+  if (at === -1) return folded.trim();
+  const before = folded.slice(0, at);
+  const after = folded.slice(at + 1);
+  const head = before.length > 60 ? `…${before.slice(-60).trimStart()}` : before.trimStart();
+  const tail = after.length > 30 ? `${after.slice(0, 30).trimEnd()}…` : after.trimEnd();
+  return `${head}⟨pin⟩${tail}`;
+}
+
+/** The outline path to a rem's PARENT — the warning names the rem itself in its subject line. */
+async function parentPathForWarning(
+  plugin: RNPlugin,
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<string | undefined> {
+  const full = await safeHierarchyPath(plugin, rem, context);
+  const parent = full?.split(' > ').slice(0, -1).join(' > ');
+  return shortenPathForWarning(parent || undefined);
+}
+
+/**
+ * Index one emitted chunk's labels and references for the check (paper exports only). Text after an
+ * unescaped `%` is a comment and is not read.
+ */
+function noteCrossReferences(
+  rem: Rem,
+  emitted: string,
+  context: Rem2TexConversionContext,
+  subject?: string
+): void {
+  const index = context.crossRefs;
+  if (!index?.check || !emitted) return;
+  const code = withoutLatexComments(emitted);
+  const labels = labelKeysIn(code);
+  const { groups } = findReferenceGroups(code);
+  // `\hyperref[label]{text}` names its label in the OPTIONS — counted, so its figure is not orphaned.
+  const hyperrefs = [...code.matchAll(/\\hyperref\[([^\]]*)\]/g)]
+    .filter((match) => match.index === undefined || !isEscaped(code, match.index))
+    .map((match) => match[1].trim())
+    .filter((key) => key.length > 0 && isCheckableKey(key));
+  if (labels.length === 0 && groups.length === 0 && hyperrefs.length === 0) return;
+  const inFloat = FLOAT_ENVIRONMENT_PATTERN.test(code);
+  for (const key of labels) index.labels.push({ key, rem, subject: subject ?? crossRefSubject(rem, code), inFloat });
+  // A reference in prose is named by the words around it, when it is reported (`textAroundForWarning`).
+  const refSubject = subject ?? environmentSubject(code);
+  for (const group of groups) {
+    const argument = code.slice(group.open + 1, group.close);
+    if (!argument.trim()) {
+      index.emptyRefs.push({ command: group.command, rem, subject: refSubject });
+      continue;
+    }
+    for (const key of referenceKeysOf(group.command, argument)) {
+      if (isCheckableKey(key)) index.refs.push({ key, command: group.command, rem, subject: refSubject });
+    }
+  }
+  for (const key of hyperrefs) index.refs.push({ key, command: 'hyperref', rem, subject: refSubject });
+}
+
+/** Warn about every cross-reference problem the index shows (paper exports). Never changes the output. */
+async function reportCrossReferences(plugin: RNPlugin, context: Rem2TexConversionContext): Promise<void> {
+  const index = context.crossRefs;
+  const log = context.log;
+  if (!index?.check || !log) return;
+  const pathOf = (rem: Rem): Promise<string | undefined> => parentPathForWarning(plugin, rem, context);
+  const alreadyWarned = (rem: Rem, command: string): boolean => index.unfilled.has(`${rem._id} ${command}`);
+
+  const defined = new Map<string, number>();
+  for (const label of index.labels) defined.set(label.key, (defined.get(label.key) ?? 0) + 1);
+  const referenced = new Set(index.refs.map((ref) => ref.key));
+
+  const reported = new Set<string>();
+  for (const ref of index.refs) {
+    const id = `ref ${ref.rem._id} ${ref.key}`;
+    if (defined.has(ref.key) || reported.has(id) || alreadyWarned(ref.rem, ref.command)) continue;
+    reported.add(id);
+    const quoted = quoteReference(ref.command, ref.key);
+    log.warn({
+      reason:
+        'This reference points at a label that nothing in the paper defines, so the PDF will print “??” in its place.',
+      subject: ref.subject ?? textAroundForWarning(ref.rem, ref.command === 'hyperref' ? quoted : ref.key),
+      path: await pathOf(ref.rem),
+      quotesLabel: 'the reference',
+      quotes: [quoted],
+    });
+  }
+
+  for (const empty of index.emptyRefs) {
+    const id = `empty ${empty.rem._id} ${empty.command}`;
+    if (reported.has(id) || alreadyWarned(empty.rem, empty.command)) continue;
+    reported.add(id);
+    log.warn({
+      reason: 'This reference is empty, so the PDF will print “??” in its place.',
+      subject: empty.subject ?? textAroundForWarning(empty.rem, `\\${empty.command}{}`),
+      path: await pathOf(empty.rem),
+      quotesLabel: 'the reference',
+      quotes: [`\\${empty.command}{}`],
+    });
+  }
+
+  for (const [key, count] of defined) {
+    if (count < 2) continue;
+    const second = index.labels.filter((label) => label.key === key)[1];
+    log.warn({
+      reason: `This label is defined ${count} times, so every reference to it lands on only one of them.`,
+      subject: second.subject,
+      path: await pathOf(second.rem),
+      quotesLabel: 'the label',
+      quotes: [`\\label{${key}}`],
+    });
+  }
+
+  // A figure counts as referenced when ANY of its labels is: subfigure panels often go unreferenced.
+  const floats = new Map<string, { rem: Rem; subject: string; keys: string[] }>();
+  for (const label of index.labels) {
+    if (!label.inFloat) continue;
+    const entry = floats.get(label.rem._id) ?? { rem: label.rem, subject: label.subject, keys: [] };
+    entry.keys.push(label.key);
+    floats.set(label.rem._id, entry);
+  }
+  for (const float of floats.values()) {
+    if (float.keys.some((key) => referenced.has(key))) continue;
+    log.warn({
+      reason:
+        'Nothing in the paper refers to this figure or table, and most journals ask for every one to be cited in the text.',
+      subject: float.subject,
+      path: await pathOf(float.rem),
+      quotesLabel: float.keys.length > 1 ? 'its labels' : 'its label',
+      quotes: float.keys.map((key) => `\\label{${key}}`),
+    });
+  }
+
+  const headings = index.headingLabelsAdded > 0 ? `, ${index.headingLabelsAdded} heading label(s) added` : '';
+  log.info(
+    `Cross-references: ${index.refs.length} reference(s) to ${referenced.size} label(s), ` +
+      `${defined.size} label(s) defined, ${index.pinned} filled in from a pin${headings}`
+  );
+}
+
+/** A title as a label: commands with arguments dropped (`\ce{H2O}` → `h2o`), accents folded, words joined by `-`. */
+function labelSlug(title: string): string {
+  const slug = title
+    .replace(/\\[A-Za-z]+\*?(?=\s*[{[])/g, ' ')
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (slug.length <= HEADING_LABEL_SLUG_MAX) return slug;
+  const cut = slug.slice(0, HEADING_LABEL_SLUG_MAX);
+  const lastBreak = cut.lastIndexOf('-');
+  return lastBreak > 0 ? cut.slice(0, lastBreak) : cut;
+}
+
+/**
+ * The label a heading gets when a pin in a reference points at it and it has none of its own:
+ * `sec:` + its title as a slug, unique within this export. Recorded, so `applyHeadingLabels` writes
+ * it after the heading's sectioning command.
+ */
+function headingLabelFor(heading: Rem, context: Rem2TexConversionContext): string | undefined {
+  const index = context.crossRefs;
+  if (!index) return undefined;
+  const existing = index.headingLabels.get(heading._id);
+  if (existing) return existing;
+  const slug = labelSlug(ownLatexText(heading.text)) || heading._id;
+  const taken = new Set(index.headingLabels.values());
+  let label = `sec:${slug}`;
+  for (let n = 2; taken.has(label); n += 1) label = `sec:${slug}-${n}`;
+  index.headingLabels.set(heading._id, label);
+  return label;
+}
+
+/**
+ * Write each generated heading label straight after its heading's sectioning command. Runs once the
+ * whole export is serialized — a pin may come after the heading it points at — and before the lines
+ * are joined. A heading outside the export gets none; in a paper, the check reports the reference.
+ */
+function applyHeadingLabels(context: Rem2TexConversionContext): void {
+  const index = context.crossRefs;
+  if (!index) return;
+  for (const [remId, label] of index.headingLabels) {
+    const line = index.headingLines.get(remId);
+    if (!line) continue;
+    index.headingLines.delete(remId); // once only, however often this runs
+    line.output[line.index] += `\\label{${label}}`;
+    index.headingLabelsAdded += 1;
+    if (index.check) {
+      index.labels.push({ key: label, rem: line.rem, subject: headingSubject(line.rem), inFloat: false });
+    }
+  }
+}
+
+/**
+ * The label a reference to `target` names: the LAST `\label` in the target's own code, else in an
+ * image rem's figure/table blocks, else in its own text and maths (a figure labels its panels first
+ * and itself last) — else, for a heading, the label generated for it.
+ */
+async function labelOfRem(
+  plugin: RNPlugin,
+  target: Rem,
+  context: Rem2TexConversionContext
+): Promise<string | undefined> {
+  const lastLabelIn = (latex: string): string | undefined => labelKeysIn(withoutLatexComments(latex)).pop();
+  let label = lastLabelIn(
+    [
+      await richTextToString(plugin, target.text, { codeOnly: true }),
+      await richTextToString(plugin, target.backText, { codeOnly: true }),
+    ].join('\n')
+  );
+  if (!label && (hasImageTokenInRichText(target.text) || hasImageTokenInRichText(target.backText))) {
+    // No log, so nothing is warned about twice; no cross-reference state, so a caption's own pins
+    // are not resolved in turn — two figures pointing at each other would never finish.
+    const { blocks } = await getMediaCodeBlocksFromImmediateChildren(plugin, target, {
+      ...context,
+      log: undefined,
+      crossRefs: undefined,
+    });
+    label = lastLabelIn(blocks.join('\n'));
+  }
+  if (!label) label = lastLabelIn(`${ownLatexText(target.text)}\n${ownLatexText(target.backText)}`);
+  if (!label && (await target.getFontSize()) !== undefined) label = headingLabelFor(target, context);
+  return label;
+}
+
+function isRemReference(element: unknown): element is Record<string, unknown> {
+  return (
+    typeof element === 'object' &&
+    element !== null &&
+    (element as Record<string, unknown>).i === 'q' &&
+    typeof (element as Record<string, unknown>)._id === 'string'
+  );
+}
+
+/** The text of the argument holding `offset` — in a cleveref list, of just the item holding it. */
+function referenceItemAround(proj: string, group: ReferenceGroup, offset: number): string {
+  let start = group.open + 1;
+  let end = group.close;
+  if (LIST_REFERENCE_COMMANDS.has(group.command)) {
+    const comma = proj.lastIndexOf(',', offset);
+    if (comma >= start) start = comma + 1;
+    const next = proj.indexOf(',', offset);
+    if (next !== -1 && next < end) end = next;
+  }
+  return proj.slice(start, end);
+}
+
+/**
+ * `rem.text` with every reference that sits ALONE inside a reference command's argument — or alone
+ * in one item of a cleveref list — replaced by its target's label; undefined when nothing changes.
+ * One that cannot be filled in is left out, as a pin is anywhere else, and the Log says why: an
+ * inline reference would otherwise put its target's whole text inside the braces, and a Zotero pin
+ * a `\cite{…}` (`\ref{\cite{key}}`). A deleted target is `reportDanglingReferences`' business.
+ */
+async function substituteLabelPins(
+  plugin: RNPlugin,
+  rem: Rem,
+  context: Rem2TexConversionContext
+): Promise<unknown[] | undefined> {
+  const text = rem.text as unknown;
+  if (!Array.isArray(text) || !text.some(isRemReference)) return undefined;
+  const { proj, at } = projectRichText(text);
+  const { groups, balanced } = findReferenceGroups(proj);
+  // An unbalanced brace means the author is mid-edit: export the rem exactly as before.
+  if (!balanced || groups.length === 0) return undefined;
+
+  let result: unknown[] | undefined;
+  const warned = new Set<string>();
+  for (let index = 0; index < text.length; index += 1) {
+    const element = text[index];
+    if (!isRemReference(element)) continue;
+    const offset = at[index];
+    // The innermost argument holding it: in `\eqref{\ref{⟨pin⟩}}`, the `\ref`'s.
+    let group: ReferenceGroup | undefined;
+    for (const candidate of groups) {
+      if (offset > candidate.open && offset < candidate.close && (!group || candidate.open > group.open)) {
+        group = candidate;
+      }
+    }
+    if (!group) continue;
+    const target = await plugin.rem.findOne(element._id as string);
+    if (!target || (await isBookkeepingRem(target))) continue;
+
+    const zoteroItem = await findZoteroItemDoc(plugin, target);
+    const item = referenceItemAround(proj, group, offset);
+    const alone = item.split(PIN_SENTINEL).length === 2 && item.replace(PIN_SENTINEL, '').trim() === '';
+    const label = alone && !zoteroItem ? await labelOfRem(plugin, target, context) : undefined;
+    result = result ?? [...text];
+    result[index] = label ?? '';
+    if (label) {
+      if (context.crossRefs) context.crossRefs.pinned += 1;
+      continue;
+    }
+    context.crossRefs?.unfilled.add(`${rem._id} ${group.command}`);
+    const problem = zoteroItem ? 'zotero' : alone ? 'label' : 'crowded';
+    const warningKey = `${group.open} ${problem}`;
+    if (!context.log || warned.has(warningKey)) continue;
+    warned.add(warningKey);
+    const subject = `Rem "${pinContextForWarning(text, index)}"`;
+    const path = await parentPathForWarning(plugin, rem, context);
+    if (zoteroItem) {
+      context.log.warn({
+        reason:
+          `A pin inside \\${group.command}{…} points at a Zotero item. A work is cited with \\cite{…}, not ` +
+          'referenced, so the pin was left out.',
+        subject,
+        path,
+        quotesLabel: 'it points at',
+        quotes: [`"${displayTitleForWarning(zoteroItem, WARNING_SUBJECT_MAX)}"`],
+      });
+    } else if (alone) {
+      context.log.warn({
+        reason: `A pin inside \\${group.command}{…} points at a rem with no \\label, so the reference was left empty and the PDF will print “??”.`,
+        subject,
+        path,
+        quotesLabel: 'it points at',
+        quotes: [crossRefSubject(target, await richTextToString(plugin, target.text, { codeOnly: true }))],
+      });
+    } else {
+      context.log.warn({
+        reason:
+          `A pin inside \\${group.command}{…} shares its braces with other text, so Rem2Tex left it out rather ` +
+          'than guess which label it stands for. A pin is filled in only when it has the braces — or one item ' +
+          'of a \\cref list — to itself.',
+        subject,
+        path,
+      });
+    }
+  }
+  return result;
+}
+
 async function getRemBodyText(
   plugin: RNPlugin,
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<{ text: string; fromCodeBlock: boolean }> {
   const codeText = await richTextToString(plugin, rem.text, { codeOnly: true });
-  const plainText = await richTextToString(plugin, rem.text, {
+  const labelled = await substituteLabelPins(plugin, rem, context);
+  const plainText = await richTextToString(plugin, labelled ?? rem.text, {
     hierarchyRemIds: context.hierarchyRemIds,
     log: context.log,
     citationItemDocs: context.citationItemDocs,
@@ -2254,7 +2802,9 @@ async function getMediaCodeBlocksFromImmediateChildren(
     if (!found) {
       const plain = await richTextToString(plugin, child.text, { hierarchyRemIds });
       if (plain && inferMediaTypeFromLatex(plain)) {
-        blocks.push(plain);
+        // A pin inside a reference in a plain-text figure is filled in exactly as in prose.
+        const labelled = context.crossRefs ? await substituteLabelPins(plugin, child, context) : undefined;
+        blocks.push(labelled ? await richTextToString(plugin, labelled, { hierarchyRemIds }) : plain);
         found = true;
       }
     }
@@ -2534,6 +3084,7 @@ async function serializeNode(
     if (context.log) context.log.counts.mediaBlocks += mediaBlocks.length;
     for (const mediaBlock of mediaBlocks) {
       output.push(mediaBlock);
+      noteCrossReferences(rem, mediaBlock, context);
       output.push('');
     }
     return;
@@ -2581,6 +3132,8 @@ async function serializeNode(
       // Counted only when a sectioning command is actually emitted, so the Log matches the paper.
       if (context.log) context.log.counts.headings += 1;
       const typed = fromCodeBlock ? undefined : typedSectioningCommand(title);
+      // Where the sectioning line lands, so a label generated for this heading can follow it later.
+      const lineIndex = output.length;
       if (typed) {
         // The author already wrote the command. Emit it as they typed it rather than wrapping it
         // again, and say so when their level disagrees with the one the outline implies — Rem2Tex
@@ -2602,6 +3155,8 @@ async function serializeNode(
       } else {
         output.push(`\\${command}{${escapeLatex(title)}}`);
       }
+      context.crossRefs?.headingLines.set(rem._id, { output, index: lineIndex, rem });
+      noteCrossReferences(rem, output[lineIndex], context, headingSubject(rem));
       output.push('');
     } else if (context.log) {
       context.log.warn({
@@ -2647,7 +3202,9 @@ async function serializeNode(
       if (fromCodeBlock) context.log.counts.codeBlocks += 1;
       else context.log.counts.paragraphs += 1;
     }
-    output.push(fromCodeBlock ? title : escapeLatex(title));
+    const emitted = fromCodeBlock ? title : escapeLatex(title);
+    output.push(emitted);
+    noteCrossReferences(rem, emitted, context);
   }
 
   // Children in outline order (since 2026-09-03; todo children used to be hoisted above their
@@ -3583,6 +4140,7 @@ export async function runSelectionToTexConversion(
       skipRemSubtreeIds,
       ignoredRemIds: await loadIgnoredRemIds(plugin),
       citationItemDocs,
+      crossRefs: emptyCrossRefs(false),
     };
 
     const lines: string[] = [];
@@ -3594,6 +4152,7 @@ export async function runSelectionToTexConversion(
         throw await enrichConversionErrorWithSourceRem(plugin, error, anchor, context);
       }
     }
+    applyHeadingLabels(context);
 
     const body = lines.join('\n').trim();
     if (!body) {
@@ -3802,8 +4361,8 @@ export function rewriteRichTextWithCitekeys(
   const commands = findProjectedCitationCommands(proj);
   // An unbalanced `{` means the author is mid-edit; touching the rem could mangle what they type.
   if (commands === undefined) return undefined;
-  // A pin inside `\ref{…}` is the author's own label placeholder — the exporter drops it by design
-  // (see *Design decisions*), and writing a citation there would invent a label. Leave those alone.
+  // A pin inside `\ref{…}` stands for a LABEL — the exporter fills it in from the pinned rem
+  // (`substituteLabelPins`) — and writing a citation there would invent one. Leave those alone.
   const referenceCommands = findProjectedCitationCommands(proj, REFERENCE_WRAPPER_COMMANDS) ?? [];
   const citePins = allPins.filter(
     (i) => !referenceCommands.some((c) => at[i] > c.argOpen && at[i] < c.argClose)
@@ -4494,6 +5053,7 @@ export async function runRem2TexConversion(
     todoExportMode,
     log,
     ignoredRemIds: await loadIgnoredRemIds(plugin),
+    crossRefs: emptyCrossRefs(true),
   };
 
   const paperTitle = (await getRemTitle(plugin, paperRem, context)).trim() || '(untitled)';
@@ -4555,6 +5115,7 @@ export async function runRem2TexConversion(
   try {
     log.section('Conversion');
     const preamble = await getBoundaryBlock(plugin, layout.preambleRem, REQUIRED_PREAMBLE_NAME, context);
+    noteCrossReferences(layout.preambleRem, preamble, context);
     const meta = parsePreambleLatexMetadata(preamble);
     log.info(
       `${REQUIRED_PREAMBLE_NAME} block: ${preamble.split('\n').length} line(s)${meta.documentClass ? `, \\documentclass{${meta.documentClass}}` : ''}`
@@ -4563,6 +5124,7 @@ export async function runRem2TexConversion(
     if (meta.author) log.info(`Author(s): ${meta.author}`);
 
     const endBlock = await getBoundaryBlock(plugin, layout.endRem, REQUIRED_END_NAME, context);
+    noteCrossReferences(layout.endRem, endBlock, context);
     log.info(`${REQUIRED_END_NAME} block: ${endBlock.split('\n').length} line(s)`);
 
     const bodyLines: string[] = [];
@@ -4573,10 +5135,12 @@ export async function runRem2TexConversion(
         throw await enrichConversionErrorWithSourceRem(plugin, error, bodyRem, context);
       }
     }
+    applyHeadingLabels(context);
     const body = bodyLines.join('\n').trim();
     log.info(
       `Body: ${body.split('\n').length} line(s) of LaTeX from ${convertedBodyRems.length} top-level rem(s)`
     );
+    await reportCrossReferences(plugin, context);
 
     const outputLines = [preamble.trim(), '', body, '', endBlock.trim()].filter(
       (_line, index, lines) => !(index > 0 && lines[index - 1] === '' && lines[index] === '')
@@ -4623,6 +5187,7 @@ export async function runParagraphToTexConversion(
       todoExportMode: 'all',
       skipRemSubtreeIds,
       ignoredRemIds: await loadIgnoredRemIds(plugin),
+      crossRefs: emptyCrossRefs(false),
     };
 
     const lines: string[] = [];
@@ -4631,6 +5196,7 @@ export async function runParagraphToTexConversion(
     } catch (error) {
       throw await enrichConversionErrorWithSourceRem(plugin, error, paragraphRem, context);
     }
+    applyHeadingLabels(context);
 
     const latex = lines.join('\n').trim();
     if (!latex) {
@@ -4735,6 +5301,7 @@ async function resolveConvertScope(
         todoExportMode,
         log,
         ignoredRemIds,
+        crossRefs: emptyCrossRefs(true),
       },
       targetTitle: (await getRemTitle(plugin, paperRem)).trim() || '(untitled)',
       outputParent: paperRem,
@@ -4753,6 +5320,7 @@ async function resolveConvertScope(
         skipRemSubtreeIds: await collectParagraphExportSkipRemIds(target),
         log,
         ignoredRemIds,
+        crossRefs: emptyCrossRefs(false),
       },
       targetTitle: (await getRemTitle(plugin, target)).trim() || '(untitled)',
       outputParent: target,
@@ -4779,7 +5347,15 @@ async function resolveConvertScope(
   const titles = await Promise.all(anchors.slice(0, 3).map(async (a) => (await getRemTitle(plugin, a)).trim() || '(untitled)'));
   return {
     roots: anchors,
-    context: { hierarchyRemIds, rootRemId: anchors[0]._id, todoExportMode: 'all', skipRemSubtreeIds, log, ignoredRemIds },
+    context: {
+      hierarchyRemIds,
+      rootRemId: anchors[0]._id,
+      todoExportMode: 'all',
+      skipRemSubtreeIds,
+      log,
+      ignoredRemIds,
+      crossRefs: emptyCrossRefs(false),
+    },
     targetTitle: anchors.length === 1 ? titles[0] : `${anchors.length} rems (${titles.join(', ')}${anchors.length > 3 ? ', …' : ''})`,
     outputParent: anchors[0],
   };
@@ -4817,11 +5393,15 @@ export async function previewRem2TexConvert(
     if (options.kind === 'paper') {
       const focused = await getFocusedParentRem(plugin);
       const { layout } = await resolvePaperRoot(plugin, focused);
-      await getBoundaryBlock(plugin, layout.preambleRem, REQUIRED_PREAMBLE_NAME, scope.context);
-      await getBoundaryBlock(plugin, layout.endRem, REQUIRED_END_NAME, scope.context);
+      const preamble = await getBoundaryBlock(plugin, layout.preambleRem, REQUIRED_PREAMBLE_NAME, scope.context);
+      noteCrossReferences(layout.preambleRem, preamble, scope.context);
+      const endBlock = await getBoundaryBlock(plugin, layout.endRem, REQUIRED_END_NAME, scope.context);
+      noteCrossReferences(layout.endRem, endBlock, scope.context);
     }
     const lines: string[] = [];
     for (const root of scope.roots) await serializeNode(plugin, root, 0, lines, scope.context, undefined, undefined);
+    applyHeadingLabels(scope.context);
+    await reportCrossReferences(plugin, scope.context);
     if (lines.join('\n').trim().length === 0) {
       issues.push({ severity: 'error', message: 'Nothing to export — this produced no LaTeX at all.' });
     }
