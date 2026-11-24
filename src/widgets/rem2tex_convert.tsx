@@ -64,8 +64,22 @@ function Rem2TexConvertPopup() {
           kind: req.kind,
           todoExportMode: mode,
           selectedRemIds: req.selectedRemIds,
+          targetRemId: req.targetRemId,
         });
         setPreview(next);
+        // Pin what this preview ran on. Another todo mode and Convert must use the SAME rems, not
+        // whatever the focus chain resolves minutes later — its remembered caret expires after 120 s.
+        if (next.targetRemId || next.selectedRemIds) {
+          setRequest((current) =>
+            current
+              ? {
+                  ...current,
+                  targetRemId: next.targetRemId ?? current.targetRemId,
+                  selectedRemIds: next.selectedRemIds ?? current.selectedRemIds,
+                }
+              : current
+          );
+        }
         setConvertPins(true); // ticked by default on every fresh preview
         setStatus('');
       } catch (error) {
@@ -100,6 +114,7 @@ function Rem2TexConvertPopup() {
         kind: request.kind,
         todoExportMode: todoMode,
         selectedRemIds: request.selectedRemIds,
+        targetRemId: request.targetRemId,
         pinRows: withPins ? preview.pinRows : undefined,
       });
       // The citekey writes happen before the export, so they are reported either way.

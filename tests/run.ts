@@ -13,10 +13,11 @@ import * as bibliography from './bibliography.test';
 import * as citekeys from './citekeys.test';
 import * as convert from './convert.test';
 import * as crossrefs from './crossrefs.test';
+import * as adversarial from './adversarial.test';
 
 (async () => {
   let failures = 0;
-  for (const s of [pins, comments, layout, regressions, ignore, bibliography, citekeys, convert, crossrefs]) {
+  for (const s of [pins, comments, layout, regressions, ignore, bibliography, citekeys, convert, crossrefs, adversarial]) {
     failures += await s.run();
   }
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);

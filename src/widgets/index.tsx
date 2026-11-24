@@ -126,12 +126,17 @@ async function onActivate(plugin: ReactRNPlugin) {
         return;
       }
       const preview = await previewRem2TexConvert(plugin, { kind, selectedRemIds });
+      // Hand on what the preview ran on, so the popup and the run cannot drift to another rem.
+      const target = {
+        targetRemId: preview.targetRemId,
+        selectedRemIds: preview.selectedRemIds ?? selectedRemIds,
+      };
       if (preview.pinRows.length > 0 || preview.issues.length > 0) {
-        await openConvertPopup({ kind, selectedRemIds });
+        await openConvertPopup({ kind, ...target });
         return;
       }
       // Nothing to convert and nothing wrong: just do it.
-      const result = await runRem2TexConvert(plugin, { kind, selectedRemIds });
+      const result = await runRem2TexConvert(plugin, { kind, ...target });
       if (result.status === 'failed') {
         // Only reachable if a kind that reports instead of throwing ever takes this path.
         await plugin.app.toast(

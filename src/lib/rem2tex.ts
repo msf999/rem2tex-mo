@@ -562,17 +562,40 @@ function findLatexEnvironmentEnd(text: string, start: number): number {
   return -1;
 }
 
+/** Control-symbol accents (`\"{o}`, `\'{e}`, `\~{n}`, …): their argument group is part of them. */
+const ACCENT_CONTROL_SYMBOLS = new Set(['"', "'", '`', '^', '~', '=', '.']);
+
 function consumeLatexCommand(text: string, start: number): number {
   if (text[start] !== '\\') return start;
   const nextChar = text[start + 1];
   if (!nextChar) return start + 1;
 
   // Keep escaped literal symbols untouched (e.g., \%, \_, \\).
-  if (!/[A-Za-z]/.test(nextChar)) return start + 2;
+  if (!/[A-Za-z]/.test(nextChar)) {
+    // An accent takes the group that follows it; leaving the group to the plain-text escaper turned
+    // `Schr\"{o}dinger` into `Schr\"\{o\}dinger` (2026-11-24).
+    if (ACCENT_CONTROL_SYMBOLS.has(nextChar) && text[start + 2] === '{') {
+      const end = findMatchingGroup(text, start + 2, '{', '}');
+      if (end !== -1) return end;
+    }
+    return start + 2;
+  }
 
   let cursor = start + 1;
   while (cursor < text.length && /[A-Za-z]/.test(text[cursor])) {
     cursor += 1;
+  }
+  // `\verb|…|` (and `\verb*`): everything up to the matching delimiter is verbatim, never escaped.
+  if (text.slice(start + 1, cursor) === 'verb') {
+    let open = cursor;
+    if (text[open] === '*') open += 1;
+    const delimiter = text[open];
+    if (delimiter && !/[A-Za-z\s*]/.test(delimiter)) {
+      const close = text.indexOf(delimiter, open + 1);
+      const newline = text.indexOf('\n', open + 1);
+      if (close !== -1 && (newline === -1 || close < newline)) return close + 1;
+    }
+    return cursor;
   }
   if (text[cursor] === '*') cursor += 1;
 
@@ -704,6 +727,12 @@ function escapeLatex(text: string): string {
     } else if (normalizedText[cursor] === '$' && !isEscaped(normalizedText, cursor)) {
       protectedEnd = findInlineMathEnd(normalizedText, cursor, '$');
     } else if (normalizedText[cursor] === '\\') {
+      protectedEnd = consumeLatexCommand(normalizedText, cursor);
+    }
+    // An environment or display that does not close in THIS text — one opened in a rem of its own,
+    // closed in a later sibling — is still a command: escaping it as prose left a literal
+    // `\textbackslash{}begin\{…\}` beside a real `\end{…}`, which does not compile (2026-11-24).
+    if (protectedEnd <= cursor && normalizedText[cursor] === '\\') {
       protectedEnd = consumeLatexCommand(normalizedText, cursor);
     }
 
@@ -1275,9 +1304,10 @@ function resolveDeletedReference(entry: Record<string, unknown>, options: Flatte
 /**
  * A pin kept beside a written-out citekey (the `/rem2tex-citekeys` rewrite) still resolves to its
  * own `\cite{key}`, which would double the citation. `normalizeAdjacentCitations` only collapses
- * that for the literal `\cite{…}`; every other wrapper (`\supercite`, `\citep`, `\citeauthor`, …)
- * would emit a visible duplicate — and `\nocite{k}\cite{k}` would turn an invisible citation into a
- * visible one.
+ * that for the literal `\cite{…}`; every other wrapper that prints a citation (`\supercite`,
+ * `\citep`, `\textcite`, …) would emit a visible duplicate — and `\nocite{k}\cite{k}` would turn an
+ * invisible citation into a visible one. The name/year/title commands are the exception: they print
+ * no citation, so a `\cite` beside them is never a duplicate.
  *
  * So: drop a `\cite{X}` whose keys are all already named by the nearest RETAINED citation command on
  * either side, reaching across whitespace and across spans already dropped. "Either side" matters —
@@ -1337,8 +1367,13 @@ export function dropCitationsCoveredByAdjacentCommand(text: string): string {
   // A bare `\cite{…}` is the only thing the flattener generates from a pin, so only those are
   // candidates for removal; everything else is the author's own text.
   const dropped = new Set<number>();
+  // A command that prints a NAME, a year or a title (`\citeauthor`, `\citeyear`, …) covers nothing:
+  // `\citeauthor{k} \cite{k}` is the usual "Smith [1]", not a duplicate, and dropping the `\cite`
+  // deleted the citation from the sentence — whether the author typed it or a pin generated it
+  // (2026-11-24).
   const covers = (host: Found, victim: Found): boolean =>
     host.plainArg &&
+    !NON_NUMERIC_CITE_COMMANDS.has(host.name) &&
     victim.keys.length > 0 &&
     victim.keys.every((key) => host.keys.includes(key));
 
@@ -1415,13 +1450,27 @@ export async function richTextToString(
   if (isFormattingMetadataLabel(trimmed)) {
     return '';
   }
-  // Merge adjacent pins into one \cite first (so `\cite{` pin pin `}` becomes one key list), then
-  // unwrap generated \cite/\ref commands nested inside a typed one, then merge again in case the
-  // unwrap left two typed citations adjacent.
-  const merged = normalizeAdjacentCitations(trimmed);
+  // Code is the author's literal LaTeX: references inside it contribute nothing in code-only mode, so
+  // every `\cite` in it was typed, and merging or dropping one would change what was written (two
+  // paragraphs ending and starting with a citation became one, 2026-11-24).
+  if (options.codeOnly) return trimmed;
+  return normalizeCitationText(trimmed);
+}
+
+/**
+ * The citation passes every prose text goes through: merge adjacent pins into one `\cite` (so
+ * `\cite{` pin pin `}` becomes one key list), unwrap generated commands nested inside a typed one,
+ * merge again in case the unwrap left two citations adjacent, and only THEN drop a citation an
+ * adjacent command already covers. Merging before the drop matters: `\cite{a}\cite{b, a}` is two
+ * pins of one sentence, and the drop pass would delete the FIRST — reordering the keys — where the
+ * merge keeps them in reading order (2026-11-24).
+ */
+function normalizeCitationText(text: string): string {
+  const merged = normalizeAdjacentCitations(text);
   const unwrapped = unwrapNestedCitationCommands(merged);
-  const dropped = dropCitationsCoveredByAdjacentCommand(unwrapped);
-  return dropped === merged ? merged : normalizeAdjacentCitations(dropped);
+  const remerged = unwrapped === merged ? merged : normalizeAdjacentCitations(unwrapped);
+  const dropped = dropCitationsCoveredByAdjacentCommand(remerged);
+  return dropped === remerged ? remerged : normalizeAdjacentCitations(dropped);
 }
 
 export async function getRemTitle(
@@ -1820,6 +1869,30 @@ function stripTodoCommentArtifactCitations(text: string): string {
  * output-neutral: the same child labels identically whether its work is named by a pin or by a
  * written citekey.
  */
+/**
+ * Empty items out of every citation or reference key list: `\cite{a, }` → `\cite{a}`, `\cite{, a}`
+ * → `\cite{a}`, `\cite{a, , b}` → `\cite{a, b}`, leaving the rest of the spacing as typed. That is
+ * what a key list looks like once its references are ignored, so a comment-tree label reads the
+ * same before and after the citekey rewrite puts a reference beside every pin (2026-11-24).
+ */
+function dropEmptyCitationKeys(text: string): string {
+  if (!text.includes(',')) return text;
+  const names = [...CITATION_WRAPPER_COMMANDS, ...REFERENCE_WRAPPER_COMMANDS].join('|');
+  return text.replace(
+    new RegExp(`(\\\\(?:${names})\\*?(?:\\[[^\\]]*\\])*\\{)([^{}]*)\\}`, 'g'),
+    (_match, head: string, inner: string) => {
+      let cleaned = inner;
+      let previous: string;
+      do {
+        previous = cleaned;
+        cleaned = cleaned.replace(/,\s*,/g, ',');
+      } while (cleaned !== previous);
+      cleaned = cleaned.replace(/^\s*,\s*/, '').replace(/\s*,\s*$/, '');
+      return `${head}${cleaned}}`;
+    }
+  );
+}
+
 function stripEmptyCitationCommands(text: string): string {
   if (!text.includes('{')) return text;
   const names = [...CITATION_WRAPPER_COMMANDS, ...REFERENCE_WRAPPER_COMMANDS].join('|');
@@ -1837,11 +1910,17 @@ async function getCommentTreeLabel(
   rem: Rem,
   context: Rem2TexConversionContext
 ): Promise<string> {
-  let raw = flattenRawTitleText(rem.text).trim();
+  // The raw text ignores references, so the citekey rewrite's `\cite{⟨ref⟩⟨pin⟩, …}` reads as
+  // `\cite{, }` here: drop the empty items and the emptied commands before deciding there is text.
+  let raw = stripEmptyCitationCommands(dropEmptyCitationKeys(flattenRawTitleText(rem.text))).trim();
   if (!raw) {
+    // Nothing but maths, images or references: fall back to the diagnostic preview, with the
+    // references left out as the raw text leaves them out. A ⟨pin⟩ marker read differently once the
+    // rewrite had put `\cite{⟨ref⟩⟨pin⟩}` around it, and a child that is only pins gets no line at
+    // all, however many pins it has (2026-11-24).
     const diag = sanitizeDiagnosticExcerpt(buildDiagnosticRemTextPreview(rem.text));
-    if (isPinOnlyDiagnosticPreview(diag)) return '';
-    raw = diag.replace(/\s+/g, ' ').trim();
+    raw = stripEmptyCitationCommands(dropEmptyCitationKeys(diag.replace(/⟨pin⟩|<pin>|‹pin›/gi, ''))).trim();
+    if (!raw) return '';
   }
   raw = stripTodoCommentArtifactCitations(raw);
   raw = stripEmptyCitationCommands(raw);
@@ -2605,7 +2684,9 @@ async function getRemBodyText(
       .filter((line) => line.length > 0 && !isCodeMetadataArtifactLine(line))
       .join('\n');
 
-  const normalizedCode = normalizeForCodeComparison(codeText);
+  // `plainText` went through the citation passes and `codeText` did not (code stays verbatim), so
+  // compare the code as the passes would have left it — but emit it exactly as typed.
+  const normalizedCode = normalizeForCodeComparison(normalizeCitationText(codeText));
   const normalizedPlain = normalizeForCodeComparison(plainText);
 
   if (normalizedCode && normalizedCode === normalizedPlain) {
@@ -4235,11 +4316,21 @@ type ProjectedCommand = {
    * work it was never written for. A pin already inside its braces is fine — the author put it there.
    */
   hasOptions: boolean;
+  /** `\cite*{…}`: a different command from `\cite{…}`, which nothing may be merged into. */
+  starred: boolean;
 };
 
 const PIN_SENTINEL = '';
 
-/** Text-ish elements contribute their text to the projection; a pin contributes one sentinel. */
+/** Stands for an element that is neither text nor a reference: maths, an image, audio, … */
+const OBJECT_SENTINEL = '';
+
+/**
+ * Text elements contribute their text to the projection (a code run nothing), a reference one
+ * PIN_SENTINEL, and anything else one OBJECT_SENTINEL. The last is load-bearing: until 2026-11-24
+ * maths projected to nothing, so two pins either side of `$x$` looked adjacent, became one run, and
+ * the run's new `\cite{…}` replaced everything between them — the maths included.
+ */
 function projectRichText(text: unknown[]): { proj: string; at: number[] } {
   let proj = '';
   const at: number[] = [];
@@ -4254,11 +4345,11 @@ function projectRichText(text: unknown[]): { proj: string; at: number[] } {
       proj += PIN_SENTINEL;
       continue;
     }
-    const plainText =
-      (entry.i === 'm' || entry.i === undefined) && typeof entry.text === 'string' && !isCodeTextElement(entry)
-        ? entry.text
-        : '';
-    proj += plainText;
+    if (entry.i === 'm' || entry.i === undefined) {
+      proj += typeof entry.text === 'string' && !isCodeTextElement(entry) ? entry.text : '';
+      continue;
+    }
+    proj += OBJECT_SENTINEL;
   }
   return { proj, at };
 }
@@ -4285,7 +4376,8 @@ function findProjectedCitationCommands(
       continue;
     }
     let argOpen = nameEnd;
-    if (proj[argOpen] === '*') argOpen += 1;
+    const starred = proj[argOpen] === '*';
+    if (starred) argOpen += 1;
     let hasOptions = false;
     while (proj[argOpen] === '[') {
       const optionEnd = findMatchingGroup(proj, argOpen, '[', ']');
@@ -4311,8 +4403,10 @@ function findProjectedCitationCommands(
       argOpen,
       argClose: argEnd - 1,
       keys: inner.split(',').map((k) => k.trim()).filter((k) => k.length > 0),
-      plainArg: /^[^{}\\]*$/.test(inner),
+      // Maths or an image inside the braces is not a key list either.
+      plainArg: /^[^{}\\]*$/.test(inner) && !inner.includes(OBJECT_SENTINEL),
       hasOptions,
+      starred,
     });
     cursor = argEnd;
   }
@@ -4363,7 +4457,10 @@ export function rewriteRichTextWithCitekeys(
   if (commands === undefined) return undefined;
   // A pin inside `\ref{…}` stands for a LABEL — the exporter fills it in from the pinned rem
   // (`substituteLabelPins`) — and writing a citation there would invent one. Leave those alone.
-  const referenceCommands = findProjectedCitationCommands(proj, REFERENCE_WRAPPER_COMMANDS) ?? [];
+  const referenceCommands = findProjectedCitationCommands(proj, REFERENCE_WRAPPER_COMMANDS);
+  // The same mid-edit guard for a reference command: with its braces unbalanced, a pin inside it
+  // would look free and get a `\cite{…}` written into the `\ref{` (2026-11-24).
+  if (referenceCommands === undefined) return undefined;
   const citePins = allPins.filter(
     (i) => !referenceCommands.some((c) => at[i] > c.argOpen && at[i] < c.argClose)
   );
@@ -4384,7 +4481,8 @@ export function rewriteRichTextWithCitekeys(
     | { kind: 'insertBefore'; index: number; elements: unknown[] }
     | { kind: 'appendInside'; command: ProjectedCommand; elements: unknown[] }
     | { kind: 'prependInside'; command: ProjectedCommand; elements: unknown[] }
-    | { kind: 'replaceRange'; from: number; to: number; elements: unknown[] };
+    | { kind: 'replaceRange'; from: number; to: number; elements: unknown[] }
+    | { kind: 'deleteText'; from: number; to: number };
   const edits: Edit[] = [];
   const moved = new Set<number>();
 
@@ -4444,14 +4542,30 @@ export function rewriteRichTextWithCitekeys(
     else runs.push({ indices: [index] });
   }
 
+  // What a free pin may be moved across on its way into a command: whitespace, and pins that render
+  // as NOTHING in prose (a pin to a todo or a figure is dropped). Not words, not maths, not an inline
+  // reference (it reads as its target's text), not a Zotero reference (its own \cite): moving a pin
+  // across any of those moves its citation in the PDF (2026-11-24).
+  const invisibleAt = new Set<number>();
+  for (const [index, r] of refs) if (r.isPin && !r.target) invisibleAt.add(projOf(index));
+  const gapBlank = (from: number, to: number) => {
+    for (let k = from; k < to; k += 1) {
+      if (/\s/.test(proj[k]) || invisibleAt.has(k)) continue;
+      return false;
+    }
+    return true;
+  };
+  // Only a plain `\cite{…}` may take a free pin in — no star, no options, no other command. It is the
+  // only one the exporter itself merges a neighbouring citation into (normalizeAdjacentCitations),
+  // so only there is the move output-neutral. `\nocite{a}` + a pin is an invisible citation beside
+  // a visible one, `\citeauthor{a}` + a pin a name and a number, `\citep{a}` + a pin two citations:
+  // folding the pin into any of them changed the PDF (2026-11-24). `[...]` options were already
+  // excluded: absorbing would stretch a prenote/postnote over a work it was never written for.
+  const canAbsorb = (c: ProjectedCommand) => c.name === 'cite' && !c.starred && c.plainArg && !c.hasOptions;
+
   for (const run of runs) {
     const first = run.indices[0];
     const last = run.indices[run.indices.length - 1];
-    const gapBlank = (from: number, to: number) =>
-      from >= to || /^\s*$/.test(proj.slice(from, to).split(PIN_SENTINEL).join(''));
-    // A command with `[...]` options is not a candidate: absorbing the pin would stretch its
-    // prenote/postnote over a work the author never applied it to. The pin gets its own \cite{}.
-    const canAbsorb = (c: ProjectedCommand) => c.plainArg && !c.hasOptions;
     const before = [...commands]
       .reverse()
       .find((c) => c.argClose < projOf(first) && gapBlank(c.argClose + 1, projOf(first)) && canAbsorb(c));
@@ -4497,14 +4611,27 @@ export function rewriteRichTextWithCitekeys(
           const key = refs.get(i)!.target!.key;
           wantedByKey.set(key, [...(wantedByKey.get(key) ?? []), i]);
         }
-        const elements: unknown[] = [];
+        const joined: unknown[] = [];
         for (const indices of wantedByKey.values()) {
-          const block = [refElement(refs.get(indices[0])!.target!), ...indices.map((i) => text[i])];
-          if (prepend) elements.push(...block, ', ');
-          else elements.push(', ', ...block);
+          if (joined.length > 0) joined.push(', ');
+          joined.push(refElement(refs.get(indices[0])!.target!), ...indices.map((i) => text[i]));
         }
+        // An empty `\cite{}` takes the keys with no separator, which left `\cite{, key}` behind.
+        const anchorEmpty = /^\s*$/.test(proj.slice(anchor.argOpen + 1, anchor.argClose));
+        const elements = anchorEmpty ? joined : prepend ? [...joined, ', '] : [', ', ...joined];
         edits.push({ kind: prepend ? 'prependInside' : 'appendInside', command: anchor, elements });
         for (const i of wanted) moved.add(i);
+      }
+      // The whitespace between the command and the pins it took in goes with them, as the exporter's
+      // merge drops exactly that whitespace between two citations. Leaving it put a space where the
+      // export had none — `\cite{a, b} .` for `\cite{a, b}.` (2026-11-24). Only text is deleted: a
+      // dropped pin in the gap stays where it is.
+      if (run.indices.some((i) => moved.has(i))) {
+        edits.push(
+          prepend
+            ? { kind: 'deleteText', from: projOf(first), to: anchor.start }
+            : { kind: 'deleteText', from: anchor.argClose + 1, to: projOf(last) + widthOf(last) }
+        );
       }
       continue;
     }
@@ -4550,12 +4677,15 @@ function applyRichTextEdits(
     | { kind: 'appendInside'; command: ProjectedCommand; elements: unknown[] }
     | { kind: 'prependInside'; command: ProjectedCommand; elements: unknown[] }
     | { kind: 'replaceRange'; from: number; to: number; elements: unknown[] }
+    | { kind: 'deleteText'; from: number; to: number }
   >,
   moved: Set<number>,
   at: number[],
   proj: string
 ): unknown[] {
   const widthOf = (i: number) => (at[i + 1] ?? proj.length) - at[i];
+  // Projection spans whose TEXT is removed; any non-text element inside one is kept.
+  const deletions = edits.flatMap((edit) => (edit.kind === 'deleteText' && edit.to > edit.from ? [edit] : []));
 
   // Every insertion is a PROJECTION OFFSET, never an element index: two different commands can own
   // braces inside one text element (`\cite{a}` + a pin on each side), and keying by element index
@@ -4566,6 +4696,7 @@ function applyRichTextEdits(
   const insertions: Array<{ at: number; order: number; seq: number; elements: unknown[] }> = [];
   const ranges: Array<{ from: number; to: number; elements: unknown[] }> = [];
   edits.forEach((edit, seq) => {
+    if (edit.kind === 'deleteText') return;
     if (edit.kind === 'replaceRange') {
       ranges.push(edit);
       return;
@@ -4619,22 +4750,41 @@ function applyRichTextEdits(
       continue;
     }
 
+    // Push this element's text from projection offset `from` to `to`, minus any deleted span.
+    const overlapping = deletions.filter((d) => d.from < finish && d.to > begin);
+    const keep = (from: number, to: number) => {
+      let cursor = from;
+      for (const d of overlapping) {
+        const cutFrom = Math.max(d.from, from);
+        const cutTo = Math.min(d.to, to);
+        if (cutFrom >= cutTo) continue;
+        if (cutFrom > cursor) {
+          const piece = sliceTextElement(text[i], cursor - begin, cutFrom - begin);
+          if (!elementIsEmptyText(piece)) out.push(piece);
+        }
+        cursor = Math.max(cursor, cutTo);
+      }
+      if (cursor < to) {
+        const piece = sliceTextElement(text[i], cursor - begin, to - begin);
+        if (!elementIsEmptyText(piece)) out.push(piece);
+      }
+    };
+
     // Cut this text element at every offset an insertion asks for, in order.
-    let cut = 0;
+    let cut = begin;
     while (next < insertions.length && insertions[next].at < finish) {
-      const offset = insertions[next].at - begin;
-      const head = sliceTextElement(text[i], cut, offset);
-      if (!elementIsEmptyText(head)) out.push(head);
-      // Several insertions can share one offset (a prepend and an append on the same brace).
       const here = insertions[next].at;
+      keep(cut, here);
+      // Several insertions can share one offset (a prepend and an append on the same brace).
       while (next < insertions.length && insertions[next].at === here) {
         out.push(...insertions[next].elements);
         next += 1;
       }
-      cut = offset;
+      cut = here;
     }
-    const tail = cut === 0 ? text[i] : sliceTextElement(text[i], cut);
-    if (cut === 0 || !elementIsEmptyText(tail)) out.push(tail);
+    // Untouched, the element goes through BY REFERENCE, formatting and all.
+    if (cut === begin && overlapping.length === 0) out.push(text[i]);
+    else keep(cut, finish);
   }
 
   // Anything addressed past the last element (an insertBefore at text.length).
@@ -4946,6 +5096,7 @@ export async function applyCitekeyRewrite(
 
     let lastError = '';
     let written = false;
+    let skippedBecause: string | undefined;
     for (let attempt = 0; attempt < SET_TEXT_TRIES && !written; attempt += 1) {
       try {
         await Promise.race([
@@ -4959,12 +5110,25 @@ export async function applyCitekeyRewrite(
         lastError = normalizeUnknownError(error);
         // A stalled write sometimes lands anyway; re-read before trying again.
         const fresh = await plugin.rem.findOne(row.remId);
-        if (fresh && JSON.stringify(fresh.text ?? []) === JSON.stringify(row.after)) written = true;
-        else await new Promise((resolve) => setTimeout(resolve, 400));
+        const freshText = JSON.stringify(fresh?.text ?? []);
+        if (fresh && freshText === JSON.stringify(row.after)) {
+          written = true;
+        } else if (!fresh) {
+          skippedBecause = 'the rem no longer exists';
+          break;
+        } else if (freshText !== JSON.stringify(row.before)) {
+          // An edit landed while the write hung (typed in the app, or synced from another device).
+          // Retrying would overwrite it with the plan made from the older text (2026-11-24).
+          skippedBecause = 'edited since the preview';
+          break;
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
       }
     }
 
     if (written) result.applied.push(row);
+    else if (skippedBecause) result.skipped.push({ row, reason: skippedBecause });
     else result.failed.push({ row, error: lastError || 'setText did not complete' });
     onProgress?.(index + 1, rows.length);
     await yieldToHost();
@@ -5244,7 +5408,12 @@ export type Rem2TexConvertKind = 'paper' | 'paragraph' | 'selection';
 export const REM2TEX_CONVERT_REQUEST_KEY = 'rem2tex-convert-request';
 /** Widget file name — must match `src/widgets/rem2tex_convert.tsx`. */
 export const REM2TEX_CONVERT_WIDGET = 'rem2tex_convert';
-export type Rem2TexConvertRequest = { kind: Rem2TexConvertKind; selectedRemIds?: string[] };
+export type Rem2TexConvertRequest = {
+  kind: Rem2TexConvertKind;
+  selectedRemIds?: string[];
+  /** The rem a preview already resolved (paper and paragraph); the popup converts exactly that one. */
+  targetRemId?: string;
+};
 
 export type Rem2TexConvertIssue = {
   severity: 'error' | 'warning';
@@ -5271,6 +5440,12 @@ export type Rem2TexConvertPreview = {
   issues: Rem2TexConvertIssue[];
   /** True when the export cannot start at all — the popup shows the reason and offers no Convert. */
   blocked: boolean;
+  /**
+   * What this preview ran on, so the conversion can run on the SAME rems: the rem the focus chain
+   * resolved (paper and paragraph) or the selected rems (selection). Unset when it was blocked first.
+   */
+  targetRemId?: string;
+  selectedRemIds?: string[];
 };
 
 export type Rem2TexConvertOptions = {
@@ -5278,22 +5453,56 @@ export type Rem2TexConvertOptions = {
   todoExportMode?: Rem2TexTodoExportMode;
   /** Ids from the editor selection (the selection command); omitted elsewhere. */
   selectedRemIds?: string[];
+  /** A preview's `targetRemId`: when set, the focus chain is not consulted at all. */
+  targetRemId?: string;
 };
+
+/**
+ * The rem a paper or paragraph conversion runs on. With `targetRemId` — the rem an earlier preview
+ * resolved — it is that rem and nothing else: the popup previews one rem and must export the SAME
+ * one, however long the author spends reading it. Resolving the focus chain again at Convert fell
+ * through to the open document once the remembered caret had expired (120 s), and a Paragraph export
+ * took that whole document instead (2026-11-24).
+ */
+async function resolveConvertTarget(plugin: RNPlugin, targetRemId?: string): Promise<Rem> {
+  if (!targetRemId) return getFocusedParentRem(plugin);
+  const rem = await plugin.rem.findOne(targetRemId);
+  if (rem) return rem;
+  throw new Rem2TexConversionError({
+    code: 'INACCESSIBLE_REM',
+    headline: 'The rem you previewed is gone',
+    whatHappened: 'The rem this conversion was previewed on no longer exists, so nothing was written.',
+    hints: ['Close this window, click into the rem you want to export, and run the command again.'],
+  });
+}
 
 /** Roots the export will walk, plus the context it will use. Throws the same typed errors it does. */
 async function resolveConvertScope(
   plugin: RNPlugin,
   options: Rem2TexConvertOptions,
   log: Rem2TexLog
-): Promise<{ roots: Rem[]; context: Rem2TexConversionContext; targetTitle: string; outputParent: Rem }> {
+): Promise<{
+  roots: Rem[];
+  context: Rem2TexConversionContext;
+  targetTitle: string;
+  outputParent: Rem;
+  /** Paper and paragraph: the rem the target was resolved from. Selection: unset. */
+  focused?: Rem;
+  /** Paper only: where Preamble and End are. */
+  layout?: PaperLayout;
+  /** Selection only: the selected rems, as resolved. */
+  selectedRemIds?: string[];
+}> {
   const todoExportMode = options.todoExportMode ?? 'all';
   const ignoredRemIds = await loadIgnoredRemIds(plugin);
 
   if (options.kind === 'paper') {
-    const focused = await getFocusedParentRem(plugin);
+    const focused = await resolveConvertTarget(plugin, options.targetRemId);
     const { paperRem, layout } = await resolvePaperRoot(plugin, focused);
     const descendants = await paperRem.getDescendants();
     return {
+      focused,
+      layout,
       roots: layout.bodyRems,
       context: {
         hierarchyRemIds: new Set([paperRem._id, ...descendants.map((r) => r._id)]),
@@ -5309,9 +5518,10 @@ async function resolveConvertScope(
   }
 
   if (options.kind === 'paragraph') {
-    const target = await getFocusedParentRem(plugin);
+    const target = await resolveConvertTarget(plugin, options.targetRemId);
     const descendants = await target.getDescendants();
     return {
+      focused: target,
       roots: [target],
       context: {
         hierarchyRemIds: new Set([target._id, ...descendants.map((r) => r._id)]),
@@ -5346,6 +5556,7 @@ async function resolveConvertScope(
   }
   const titles = await Promise.all(anchors.slice(0, 3).map(async (a) => (await getRemTitle(plugin, a)).trim() || '(untitled)'));
   return {
+    selectedRemIds: selected.map((rem) => rem._id),
     roots: anchors,
     context: {
       hierarchyRemIds,
@@ -5390,9 +5601,8 @@ export async function previewRem2TexConvert(
   // Serialize once to surface the warnings the exporter would record (an image rem with no figure
   // block, a skipped todo taking prose with it, plain text dropped under a boundary rem).
   try {
-    if (options.kind === 'paper') {
-      const focused = await getFocusedParentRem(plugin);
-      const { layout } = await resolvePaperRoot(plugin, focused);
+    const layout = scope.layout;
+    if (options.kind === 'paper' && layout) {
       const preamble = await getBoundaryBlock(plugin, layout.preambleRem, REQUIRED_PREAMBLE_NAME, scope.context);
       noteCrossReferences(layout.preambleRem, preamble, scope.context);
       const endBlock = await getBoundaryBlock(plugin, layout.endRem, REQUIRED_END_NAME, scope.context);
@@ -5428,6 +5638,8 @@ export async function previewRem2TexConvert(
     pinKeys: plan.keys,
     issues,
     blocked: issues.some((i) => i.severity === 'error'),
+    targetRemId: scope.focused?._id,
+    selectedRemIds: scope.selectedRemIds,
   };
 }
 
@@ -5476,9 +5688,14 @@ export async function runRem2TexConvert(
   let pinsFailed = 0;
   let recordTitle: string | undefined;
 
+  // Resolve the target ONCE, so the citekey writes, their record and the export all land on the same
+  // rem — and, given a preview's `targetRemId`, on the rem that preview showed.
+  const target = options.kind === 'selection' ? undefined : await resolveConvertTarget(plugin, options.targetRemId);
+  const resolved: Rem2TexConvertOptions = { ...options, targetRemId: target?._id };
+
   if (options.pinRows && options.pinRows.length > 0) {
     const log = new Rem2TexLog();
-    const scope = await resolveConvertScope(plugin, options, log);
+    const scope = await resolveConvertScope(plugin, resolved, log);
     const applied = await applyCitekeyRewrite(plugin, options.pinRows);
     pinsWritten = applied.applied.length;
     pinsSkipped = applied.skipped.length;
@@ -5488,6 +5705,7 @@ export async function runRem2TexConvert(
 
   if (options.kind === 'paper') {
     const result = await runRem2TexConversion(plugin, {
+      parentRem: target,
       todoExportMode: options.todoExportMode ?? 'all',
       commandLabel: 'Convert Paper to TeX',
     });
@@ -5506,7 +5724,7 @@ export async function runRem2TexConvert(
   }
 
   if (options.kind === 'paragraph') {
-    const outputTitle = await runParagraphToTexConversion(plugin);
+    const outputTitle = await runParagraphToTexConversion(plugin, { paragraphRem: target });
     // This one throws on failure, so getting here IS the success case.
     return { kind: 'paragraph', outputTitle, status: 'success', pinsWritten, pinsSkipped, pinsFailed, recordTitle, warningCount: 0 };
   }

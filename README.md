@@ -87,7 +87,8 @@ All four are prefixed **`Rem2Tex:`** in the omnibar.
 
 **Paragraph** and **Selection** only open the preview when there is something to say — pins that could
 become citekeys, or a problem worth seeing. Otherwise they just run and toast. The todo choice is
-offered for papers only; Paragraph and Selection always comment every todo.
+offered for papers only; Paragraph and Selection always comment every todo. However long you spend
+in the preview, **Convert exports the rem the preview showed**, even after you've clicked elsewhere.
 
 ---
 
@@ -96,8 +97,8 @@ offered for papers only; Paragraph and Selection always comment every todo.
 | In Remnote | In the LaTeX |
 | --- | --- |
 | Heading rem | `\section`, `\subsection`, `\subsubsection`, `\paragraph`, `\subparagraph` — by **outline depth**, not by the H1/H2/H3 size |
-| Prose rem | an escaped paragraph: `% & _ # $ { } ^` are escaped, while anything you typed as LaTeX (`\textbf{…}`, `$x^2$`, `\begin{equation}…\end{equation}`) passes through untouched — a `\` always starts a command, so write `\textbackslash{}` for a literal backslash |
-| Code block rem | verbatim — put tables, figures and anything fragile in one |
+| Prose rem | an escaped paragraph: `% & _ # $ { } ^` are escaped, while anything you typed as LaTeX (`\textbf{…}`, `\"{o}`, `\verb\|…\|`, `$x^2$`, `\begin{equation}…\end{equation}`) passes through untouched — so does a `\begin{itemize}` or `\[` whose `\end` is in a later rem, so a list can be split across sibling rems. A `\` always starts a command, so write `\textbackslash{}` for a literal backslash |
+| Code block rem | verbatim, character for character — put tables, figures and anything fragile in one |
 | Math element | `$…$`, or `$$…$$` when marked as block |
 | Image rem | only the `\begin{figure}` / `\begin{table}` code block you put underneath it; the image, its own caption text and any other children are dropped (the log says which), and with no such block you get a visible `REM2TEX WARNING` box |
 | Pin or reference into `Zotero / Items` | `\cite{<citekey>}` — the item doc's title is the key |
@@ -143,17 +144,24 @@ citation by hand. The pin goes **inside** the braces, next to the key it belongs
 | `⟨pin A⟩⟨pin B⟩` (or separated by spaces) | `\cite{keyA⟨pin A⟩, keyB⟨pin B⟩}` — one command, both works |
 | the same paper pinned twice | `\cite{keyA⟨pin A⟩⟨pin A⟩}` — one key, both pins kept |
 | `\supercite{⟨pin A⟩}` you typed yourself | `\supercite{keyA⟨pin A⟩}` — your command is kept |
+| `\cite{other2000} ⟨pin A⟩` | `\cite{other2000, keyA⟨pin A⟩}` — the pin joins the plain `\cite` beside it |
 
 > [!IMPORTANT]
 > **The exported LaTeX does not change.** Converting is a convenience for reading your own outline,
 > never a change to the document: the `.tex` you get is byte-identical before and after. (One
-> improvement, not a change: if you had typed a key and pinned the paper right after it with no
-> comma, `\cite{other2000⟨pin⟩}`, that used to export as the single nonexistent key
-> `\cite{other2000smith2020}`. Converting separates them properly.)
+> improvement, not a change: if you had typed something inside the braces right against a pin with
+> no comma, as in `\cite{other2000⟨pin⟩}`, it used to export as one nonexistent key,
+> `\cite{other2000smith2020}`. Converting separates the two properly.)
 
-A citation you wrote with a page note keeps it to itself: `\cite[p. 3]{smith2020}` next to a pin for
-another paper gets that paper its own `\cite{...}` rather than being folded in, so the "p. 3" never
-spreads to a work you did not apply it to.
+A pin joins only a **plain `\cite{…}`** right beside it, with nothing but spaces between them; the
+spaces go too, as they do when the export merges two citations. In every other case the pin gets a
+`\cite{…}` of its own:
+- next to any other command (`\nocite`, `\citeauthor`, `\citep`, `\cite*`, …);
+- next to a `\cite` with a page note: `\cite[p. 3]{smith2020}` beside a pin for another paper, so
+  the "p. 3" never spreads to a work you did not apply it to;
+- when words, maths or a reference stand between the pin and the `\cite`.
+
+Folding the pin into any of these would change the PDF.
 
 What it will **not** touch: code blocks, image rems, `Preamble` and `End`, anything tagged
 `Rem2Tex-ignore`, Rem2Tex's own earlier exports, anything inside the `Zotero` tree itself, and pins
@@ -341,5 +349,10 @@ export rem with the log in it.
   reference keeps its remembered words and a pin contributes nothing, as usual. Either way the log
   warns, naming the rem and what it used to be — so a citation can never disappear unnoticed.
 - **The citekey rewrite preserves everything else in the rem** — bold, maths, clozes and your other
-  references are carried across untouched, because only the pins and the text around them are
-  rewritten.
+  references are carried across untouched, even maths sitting between two pins, because only the
+  pins and the spaces around them are rewritten. If a rem changes while a write is under way, it is
+  skipped rather than overwritten.
+- **A citation beside `\citeauthor`, `\citeyear` or `\citetitle` is kept**, because those print a
+  name, a year or a title rather than a citation: `\citeauthor{k} \cite{k}` gives "Smith [1]". A
+  `\cite{k}` right after a command that already prints a citation of the same work (`\citet{k}
+  \cite{k}`, or a pin beside `\supercite{k}`) is dropped, since it would print the number twice.

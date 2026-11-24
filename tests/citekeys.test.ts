@@ -16,7 +16,9 @@ export async function run(): Promise<number> {
   const drop = dropCitationsCoveredByAdjacentCommand;
   const pairs: Array<[string, string, string]> = [
     ['a wrapper swallows the pin it already names', '\\supercite{smith2020}\\cite{smith2020}', '\\supercite{smith2020}'],
-    ['and so does \\citeauthor, whose printed word must survive', 'As \\citeauthor{smith2020}\\cite{smith2020} showed.', 'As \\citeauthor{smith2020} showed.'],
+    // \citeauthor prints a NAME, not a citation, so the \cite beside it is never a duplicate — it
+    // is the usual "Smith [1]". Dropping it (as this pass did until 2026-11-24) deleted the citation.
+    ['\\citeauthor covers nothing: its \\cite is not a duplicate', 'As \\citeauthor{smith2020}\\cite{smith2020} showed.', 'As \\citeauthor{smith2020}\\cite{smith2020} showed.'],
     ['\\nocite stays invisible instead of becoming a visible citation', '\\nocite{a}\\cite{a}', '\\nocite{a}'],
     ['the pin may come FIRST (a hand-written <pin>\\supercite{k})', '\\cite{smith2020}\\supercite{smith2020}', '\\supercite{smith2020}'],
     ['options on the wrapper do not block it', '\\supercite[p. 3]{smith2020}\\cite{smith2020}', '\\supercite[p. 3]{smith2020}'],
