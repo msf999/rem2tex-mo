@@ -32,9 +32,9 @@ export async function run(): Promise<number> {
   );
   t.equal('a merged key list becomes one bracket', renumber('\\cite{a, b}'), '[1, 2]');
   t.equal(
-    'every citation command family is renumbered',
+    'every citation command family is renumbered (\\textcite keeps its author: 2026-11-25)',
     renumber('\\citep{a} \\textcite{b} \\parencite{a}'),
-    '[1] [2] [1]'
+    '[1] \\citeauthor{b} [2] [1]'
   );
   t.equal(
     '\\supercite keeps its superscript',

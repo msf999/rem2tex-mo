@@ -770,6 +770,13 @@ type FlattenOptions = {
   log?: Rem2TexLog;
   /** Citekey -> `Zotero/Items` doc, recorded as citations are emitted (see the context field). */
   citationItemDocs?: Map<string, Rem>;
+  /**
+   * The rem whose own text is being flattened. A reference back to it is a cycle from the start, so
+   * an inline self-reference reads as nothing instead of a copy of the rem (2026-11-25).
+   */
+  selfRemId?: string;
+  /** Internal: the targets already spelled out in the current reference's expansion (step 4). */
+  expansion?: { expanded: Set<string> };
 };
 
 const DIAGNOSTIC_PREVIEW_MAX = 1400;
@@ -830,13 +837,23 @@ function isPinOnlyDiagnosticPreview(value: string): boolean {
   return /^(\u27e8pin\u27e9|<pin>|\u2039pin\u203a)$/i.test(normalized);
 }
 
-async function isTodoHeadingMetadataChild(rem: Rem): Promise<boolean> {
+async function isTodoHeadingMetadataChild(plugin: RNPlugin, rem: Rem): Promise<boolean> {
   const childHeadingStyle = await rem.getFontSize();
   if (childHeadingStyle !== undefined) return false;
   const children = await rem.getChildrenRem();
   if (children.length > 0) return false;
   const preview = sanitizeDiagnosticExcerpt(buildDiagnosticRemTextPreview(rem.text));
-  return isPinOnlyDiagnosticPreview(preview);
+  if (!isPinOnlyDiagnosticPreview(preview)) return false;
+  // A pin to a Zotero item — live, or deleted with its breadcrumb — is a CITATION the author put
+  // there, not the Status child. Mistaken for it, the citation was dropped from the export, and the
+  // citekey rewrite then made it reappear (2026-11-25, r2-01).
+  for (const element of Array.isArray(rem.text) ? rem.text : []) {
+    const entry = (element ?? {}) as Record<string, unknown>;
+    if (entry.i !== 'q' || typeof entry._id !== 'string') continue;
+    const target = await plugin.rem.findOne(entry._id);
+    if (target ? await findZoteroItemDoc(plugin, target) : deletedReferenceTarget(entry).citekey) return false;
+  }
+  return true;
 }
 
 function isCodeTextElement(entry: Record<string, unknown>): boolean {
@@ -954,6 +971,16 @@ const CITATION_WRAPPER_COMMANDS = new Set([
   'Cite',
   'Parencite',
   'Textcite',
+  'Citet',
+  // Capitalised natbib and biblatex forms, and the full-entry commands (2026-11-25, r2-09): a pin
+  // inside one exported `\\Citep{\\cite{key}}`, which does not compile.
+  'Citep',
+  'Citealp',
+  'Citealt',
+  'Smartcite',
+  'Footcite',
+  'fullcite',
+  'footfullcite',
   'Autocite',
   // Print a name / year / title rather than a label. Recognised here so a pin typed inside one is
   // unwrapped like any other, and so the numbered export registers the work they name; what they
@@ -974,12 +1001,29 @@ const REFERENCE_WRAPPER_COMMANDS = new Set([
   'eqref',
   'pageref',
   'autoref',
+  'Autoref',
   'nameref',
+  'Nameref',
+  'subref',
   'vref',
+  'Vref',
+  'vpageref',
+  'fullref',
+  'vrefrange',
+  'vpagerefrange',
   'cref',
   'Cref',
+  'cpageref',
+  'Cpageref',
+  'labelcref',
+  'labelcpageref',
+  'namecref',
+  'nameCref',
+  'lcnamecref',
   'crefrange',
   'Crefrange',
+  'cpagerefrange',
+  'Cpagerefrange',
 ]);
 
 /**
@@ -1227,11 +1271,21 @@ async function flattenRichTextElement(
     }
 
     // 4. Inline references (and pins inside todo comments) resolve to the target's visible text.
+    //    Each target is spelled out ONCE per reference: met again inside that expansion, it reads as
+    //    its own words and maths only. Rems whose texts reference each other used to multiply the
+    //    work, and the output, by every nested path (2026-11-25: one reference into twelve such rems
+    //    cost 64,472 findOne calls and a 122,040-character line).
+    const expansion = options.expansion ?? { expanded: new Set<string>() };
+    if (expansion.expanded.has(entry._id)) {
+      const ownWords = ownVisibleText(linkedRem.text).trim();
+      return isBookkeepingReferenceText(ownWords) ? '' : ownWords;
+    }
+    expansion.expanded.add(entry._id);
     const linkedText = (
       await flattenRichTextElement(
         plugin,
         linkedRem.text,
-        { ...options, suppressExternalCitationWrap: true },
+        { ...options, suppressExternalCitationWrap: true, expansion },
         nextSeen,
         depth + 1
       )
@@ -1263,6 +1317,20 @@ async function flattenRichTextElement(
   return '';
 }
 
+/** A rem's own words and maths, its references left out: how a target already spelled out reads again. */
+function ownVisibleText(richText: unknown): string {
+  if (typeof richText === 'string') return richText;
+  if (!Array.isArray(richText)) return '';
+  return richText
+    .map((element) => {
+      if (typeof element === 'string') return element;
+      const entry = (element ?? {}) as Record<string, unknown>;
+      if (entry.i === 'x' && typeof entry.text === 'string') return wrapRemnoteMath(entry.text, entry.block === true);
+      return (entry.i === 'm' || entry.i === undefined) && typeof entry.text === 'string' ? entry.text : '';
+    })
+    .join('');
+}
+
 /**
  * Recover what a deleted reference pointed at, from the breadcrumb RemNote preserves on the element.
  *
@@ -1274,19 +1342,30 @@ async function flattenRichTextElement(
  * live reference of each kind behaves. Either way the loss is RECORDED: a reference into thin air is
  * something the author has to fix, and it used to vanish without a word.
  */
-function resolveDeletedReference(entry: Record<string, unknown>, options: FlattenOptions): string {
+/**
+ * What a deleted reference still knows about its target: the breadcrumb as text, its segments, and
+ * the citekey when the path ran `Zotero` → `Items` → X.
+ */
+function deletedReferenceTarget(entry: Record<string, unknown>): {
+  remembered: string;
+  segments: string[];
+  citekey?: string;
+} {
   const remembered = flattenRawTitleText(entry.textOfDeletedRem).replace(/\s+/g, ' ').trim();
-  if (!remembered) {
-    options.log?.danglingReference({ remembered: '(no remembered text)' });
-    return '';
-  }
-
   // The breadcrumb separator RemNote writes between path segments.
   const segments = remembered.split('|').map((part) => part.trim()).filter((part) => part.length > 0);
   const itemsAt = segments.findIndex(
     (part, i) => part === ZOTERO_ITEMS_TITLE && segments[i - 1] === ZOTERO_ROOT_TITLE
   );
-  const citekey = itemsAt >= 0 ? segments[itemsAt + 1] : undefined;
+  return { remembered, segments, citekey: itemsAt >= 0 ? segments[itemsAt + 1] : undefined };
+}
+
+function resolveDeletedReference(entry: Record<string, unknown>, options: FlattenOptions): string {
+  const { remembered, segments, citekey } = deletedReferenceTarget(entry);
+  if (!remembered) {
+    options.log?.danglingReference({ remembered: '(no remembered text)' });
+    return '';
+  }
 
   if (citekey) {
     const citation = toLatexCitation(citekey);
@@ -1395,6 +1474,8 @@ export function dropCitationsCoveredByAdjacentCommand(text: string): string {
 
   // Which side the survivor sits on, so only the gap between the two is swallowed.
   const swallow = new Map<number, -1 | 1>();
+  // Keys left in a `\\cite` that a neighbouring non-`\\cite` command covers only in part (below).
+  const trimmed = new Map<number, string[]>();
   for (let i = 0; i < found.length; i += 1) {
     const victim = found[i];
     if (victim.name !== 'cite' || !victim.plainArg || victim.keys.length === 0) continue;
@@ -1412,14 +1493,34 @@ export function dropCitationsCoveredByAdjacentCommand(text: string): string {
       if (found[right].name === 'cite' && covers(victim, found[right])) continue;
       dropped.add(i);
       swallow.set(i, 1);
+      continue;
+    }
+    // Covered in PART by a neighbouring command the merge never joins (`\\nocite`, `\\supercite`, …):
+    // a pin kept beside `\\nocite{k}` merged with a second pin into `\\cite{k, j}` and cited k
+    // visibly — or twice, beside `\\supercite{k}`. Drop just the covered keys (2026-11-25, r2-10).
+    for (const side of [left, right]) {
+      if (side === undefined || found[side].name === 'cite') continue;
+      const host = found[side];
+      if (!host.plainArg || NON_NUMERIC_CITE_COMMANDS.has(host.name)) continue;
+      const kept = victim.keys.filter((key) => !host.keys.includes(key));
+      if (kept.length > 0 && kept.length < victim.keys.length) {
+        trimmed.set(i, kept);
+        break;
+      }
     }
   }
 
-  if (dropped.size === 0) return text;
+  if (dropped.size === 0 && trimmed.size === 0) return text;
 
   let output = '';
   let at = 0;
   for (let i = 0; i < found.length; i += 1) {
+    const kept = trimmed.get(i);
+    if (kept) {
+      output += `${text.slice(at, found[i].start)}\\cite{${kept.join(', ')}}`;
+      at = found[i].end;
+      continue;
+    }
     if (!dropped.has(i)) continue;
     const side = swallow.get(i);
     // Take the gap between the duplicate and the command that covers it, never other spacing.
@@ -1442,7 +1543,8 @@ export async function richTextToString(
   options: FlattenOptions = {}
 ): Promise<string> {
   if (text === null || text === undefined) return '';
-  const flattened = await flattenRichTextElement(plugin, text, options);
+  const seen = new Set<string>(options.selfRemId ? [options.selfRemId] : []);
+  const flattened = await flattenRichTextElement(plugin, text, options, seen);
   const trimmed = flattened.trim();
   if (/^query:/i.test(trimmed)) {
     return '';
@@ -1480,6 +1582,7 @@ export async function getRemTitle(
 ): Promise<string> {
   return richTextToString(plugin, rem.text, {
     hierarchyRemIds: context?.hierarchyRemIds,
+    selfRemId: rem._id,
   });
 }
 
@@ -1549,7 +1652,7 @@ async function getBoundaryBlock(
   const droppedPlainLines =
     codeLines.length > 0
       ? plainLines
-          .flatMap((line) => line.split('\n'))
+          .flatMap((line) => line.split(TEX_LINE_BREAK))
           .map((line) => line.trim())
           .filter((line) => line.length > 0 && !isCodeMetadataArtifactLine(line))
       : [];
@@ -1809,6 +1912,12 @@ export async function getFocusedParentRem(plugin: RNPlugin): Promise<Rem> {
   });
 }
 
+/**
+ * Where TeX ends an input line: LF, CRLF, and a lone CR too (TeX Live reads all three as line ends).
+ * Every `%` comment line is split on this, so no text after a CR escapes its comment (2026-11-25).
+ */
+const TEX_LINE_BREAK = /\r\n?|\n/;
+
 async function todoComment(
   plugin: RNPlugin,
   rem: Rem,
@@ -1821,13 +1930,15 @@ async function todoComment(
     todoContentResolvePinsAsText: true,
     log: context.log,
     citationItemDocs: context.citationItemDocs,
+    selfRemId: rem._id,
   });
   const cleaned = stripTodoCommentArtifactCitations(text);
   if (!cleaned) return `% TODO ${marker}`;
   // Every physical line must carry its own `%`. A lone newline survives the whitespace collapse
   // above (a soft line break, or a pin to a multi-line code block resolved as text), and an
-  // unprefixed continuation line would otherwise be emitted as real LaTeX body content.
-  const [first, ...rest] = cleaned.split(/\r?\n/);
+  // unprefixed continuation line would otherwise be emitted as real LaTeX body content. TeX ends a
+  // line at a lone CR as well as at LF and CRLF, so all three split (2026-11-25).
+  const [first, ...rest] = cleaned.split(TEX_LINE_BREAK);
   const lines = [`% TODO ${marker} ${first}`.trimEnd()];
   for (const line of rest) {
     const trimmed = line.trim();
@@ -2051,10 +2162,11 @@ async function commentRemLines(
       todoContentResolvePinsAsText: true,
       log: context.log,
       citationItemDocs: context.citationItemDocs,
+      selfRemId: rem._id,
     })
   ).replace(/\\cite\{Status\}/gi, '');
   const lines = text
-    .split(/\r?\n/)
+    .split(TEX_LINE_BREAK)
     .map((line) => line.trim())
     .filter((line, index) => index === 0 || line.length > 0)
     .map((line) => (line.startsWith('%') ? line : `% ${line}`));
@@ -2064,7 +2176,7 @@ async function commentRemLines(
 /** Push a (possibly multi-line) `%` comment with `depth` leading spaces before each `%`. */
 function emitIndentedCommentBlock(output: string[], raw: string, depth: number): void {
   const lead = leadingSpacesForTodoCommentDepth(depth);
-  for (const line of raw.split(/\r?\n/)) {
+  for (const line of raw.split(TEX_LINE_BREAK)) {
     const rest = line.startsWith('%') ? line.slice(1) : line;
     output.push(`${lead}%${rest}`);
   }
@@ -2081,7 +2193,7 @@ async function emitTodoChildrenAsCommentTree(
   const children = await parentRem.getChildrenRem();
   const lead = leadingSpacesForTodoCommentDepth(depth);
   for (const child of children) {
-    if (await isTodoHeadingMetadataChild(child)) {
+    if (await isTodoHeadingMetadataChild(plugin, child)) {
       continue;
     }
     if (context.skipRemSubtreeIds?.has(child._id)) {
@@ -2102,6 +2214,7 @@ async function emitTodoChildrenAsCommentTree(
       if (await shouldExportTodoAsComment(child, context)) {
         if (context.log) context.log.counts.todoComments += 1;
         emitIndentedCommentBlock(output, await todoComment(plugin, child, context), depth);
+        await reportDanglingReferences(plugin, child, context);
         await emitTodoChildrenAsCommentTree(plugin, child, output, context, depth + 1);
       } else {
         await noteSkippedTodo(plugin, child, context);
@@ -2109,6 +2222,7 @@ async function emitTodoChildrenAsCommentTree(
     } else if (!childIsHeading && isCommentRem(child)) {
       if (context.log) context.log.counts.commentRems += 1;
       emitIndentedCommentBlock(output, await commentRemLines(plugin, child, context), depth);
+      await reportDanglingReferences(plugin, child, context);
       await emitTodoChildrenAsCommentTree(plugin, child, output, context, depth + 1);
     } else {
       const label = await getCommentTreeLabel(plugin, child, context);
@@ -2143,7 +2257,8 @@ async function emitTodoChildrenAsCommentTree(
 export type Rem2TexCrossRefs = {
   /** Paper exports: index what is emitted, for `reportCrossReferences`. */
   check: boolean;
-  labels: Array<{ key: string; rem: Rem; subject: string; inFloat: boolean }>;
+  /** `float` names the figure or table a label sits in, so two floats in one code block count apart. */
+  labels: Array<{ key: string; rem: Rem; subject: string; inFloat: boolean; float?: string }>;
   /** `subject` is set when the reference sits in a heading, figure, table or equation. */
   refs: Array<{ key: string; command: string; rem: Rem; subject?: string }>;
   /** Reference commands whose argument came out empty (`\ref{}`). */
@@ -2161,6 +2276,10 @@ export type Rem2TexCrossRefs = {
   headingLines: Map<string, { output: string[]; index: number; rem: Rem }>;
   /** Generated heading labels actually written into the output. */
   headingLabelsAdded: number;
+  /** Per paper rem id: what `paperHeadingScan` read of it, and the labels given out so far. */
+  paperHeadingLabels: Map<string, Promise<PaperHeadingScan>>;
+  /** Headings a pin points at that LaTeX does not number, so they get no label (r2-12). */
+  unnumberedHeadings: Set<string>;
 };
 
 export function emptyCrossRefs(check: boolean): Rem2TexCrossRefs {
@@ -2174,13 +2293,22 @@ export function emptyCrossRefs(check: boolean): Rem2TexCrossRefs {
     headingLabels: new Map(),
     headingLines: new Map(),
     headingLabelsAdded: 0,
+    paperHeadingLabels: new Map(),
+    unnumberedHeadings: new Set(),
   };
 }
 
 /** cleveref's commands that take a comma-separated LIST of labels; every other one takes one. */
-const LIST_REFERENCE_COMMANDS = new Set(['cref', 'Cref']);
+const LIST_REFERENCE_COMMANDS = new Set(['cref', 'Cref', 'cpageref', 'Cpageref', 'labelcref', 'labelcpageref']);
 /** Range commands take two labels, `{first}{last}`. */
-const RANGE_REFERENCE_COMMANDS = new Set(['crefrange', 'Crefrange']);
+const RANGE_REFERENCE_COMMANDS = new Set([
+  'crefrange',
+  'Crefrange',
+  'cpagerefrange',
+  'Cpagerefrange',
+  'vrefrange',
+  'vpagerefrange',
+]);
 
 const FLOAT_ENVIRONMENT_PATTERN =
   /\\begin\{(?:figure|table|sidewaysfigure|sidewaystable|wrapfigure|wraptable)\*?\}/;
@@ -2205,6 +2333,12 @@ function findReferenceGroups(text: string): { groups: ReferenceGroup[]; balanced
     if (!REFERENCE_WRAPPER_COMMANDS.has(command) || isEscaped(text, match.index)) continue;
     let cursor = pattern.lastIndex;
     if (text[cursor] === '*') cursor += 1;
+    // varioref's `\vpageref[here][there]{key}` and `\vrefrange[text]{a}{b}` take options first.
+    while (text[cursor] === '[') {
+      const optionsEnd = findMatchingGroup(text, cursor, '[', ']');
+      if (optionsEnd === -1) break;
+      cursor = optionsEnd;
+    }
     const wanted = RANGE_REFERENCE_COMMANDS.has(command) ? 2 : 1;
     for (let n = 0; n < wanted && text[cursor] === '{'; n += 1) {
       const end = findMatchingGroup(text, cursor, '{', '}');
@@ -2238,26 +2372,55 @@ function quoteReference(command: string, key: string): string {
   return command === 'hyperref' ? `\\hyperref[${key}]` : `\\${command}{${key}}`;
 }
 
-/** The `\label` keys in `code`, in order of appearance. */
-function labelKeysIn(code: string): string[] {
-  const keys: string[] = [];
+/** The `\label` keys in `code` with where each sits, in order of appearance. */
+function labelsAt(code: string): Array<{ key: string; at: number }> {
+  const labels: Array<{ key: string; at: number }> = [];
   for (const match of code.matchAll(/\\label\{([^{}]*)\}/g)) {
-    if (match.index !== undefined && isEscaped(code, match.index)) continue;
+    if (match.index === undefined || isEscaped(code, match.index)) continue;
     const key = match[1].trim();
-    if (key && isCheckableKey(key)) keys.push(key);
+    if (key && isCheckableKey(key)) labels.push({ key, at: match.index });
   }
-  return keys;
+  return labels;
 }
 
-/** Everything after an unescaped `%` dropped, line by line: a commented-out `\ref` is no reference. */
+/** The `\label` keys in `code`, in order of appearance. */
+function labelKeysIn(code: string): string[] {
+  return labelsAt(code).map((label) => label.key);
+}
+
+/**
+ * Each figure or table environment in `code` as `[start, end)`; one left open runs to the end, as
+ * a float split across sibling rems does. Two floats in one code block are two (2026-11-25: they
+ * were pooled, so a never-cited one hid behind its cited neighbour).
+ */
+function floatSpans(code: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const begin = new RegExp(FLOAT_ENVIRONMENT_PATTERN.source, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = begin.exec(code)) !== null) {
+    if (isEscaped(code, match.index)) continue;
+    const endTag = match[0].replace('\\begin', '\\end');
+    const close = code.indexOf(endTag, begin.lastIndex);
+    const end = close === -1 ? code.length : close + endTag.length;
+    spans.push([match.index, end]);
+    begin.lastIndex = end;
+  }
+  return spans;
+}
+
+/**
+ * Everything after an unescaped `%` dropped, line by line: a commented-out `\ref` is no reference. A
+ * line ends at LF, CRLF or a lone CR, as in TeX (2026-11-25, r2-08); the line ends themselves stay.
+ */
 function withoutLatexComments(text: string): string {
   return text
-    .split('\n')
-    .map((line) => {
-      const at = firstCommentIndex(line);
-      return at === -1 ? line : line.slice(0, at);
+    .split(/(\r\n?|\n)/)
+    .map((piece, index) => {
+      if (index % 2 === 1) return piece;
+      const at = firstCommentIndex(piece);
+      return at === -1 ? piece : piece.slice(0, at);
     })
-    .join('\n');
+    .join('');
 }
 
 /** LaTeX the rem itself carries — its text, code and maths — never what its references point at. */
@@ -2359,12 +2522,14 @@ function noteCrossReferences(
   rem: Rem,
   emitted: string,
   context: Rem2TexConversionContext,
-  subject?: string
+  subject?: string,
+  /** Which block of the rem this is, when it emits several (an image rem's figure blocks). */
+  block?: number
 ): void {
   const index = context.crossRefs;
   if (!index?.check || !emitted) return;
   const code = withoutLatexComments(emitted);
-  const labels = labelKeysIn(code);
+  const labels = labelsAt(code);
   const { groups } = findReferenceGroups(code);
   // `\hyperref[label]{text}` names its label in the OPTIONS — counted, so its figure is not orphaned.
   const hyperrefs = [...code.matchAll(/\\hyperref\[([^\]]*)\]/g)]
@@ -2372,8 +2537,22 @@ function noteCrossReferences(
     .map((match) => match[1].trim())
     .filter((key) => key.length > 0 && isCheckableKey(key));
   if (labels.length === 0 && groups.length === 0 && hyperrefs.length === 0) return;
-  const inFloat = FLOAT_ENVIRONMENT_PATTERN.test(code);
-  for (const key of labels) index.labels.push({ key, rem, subject: subject ?? crossRefSubject(rem, code), inFloat });
+  const floats = floatSpans(code);
+  for (const { key, at } of labels) {
+    const float = floats.findIndex(([start, end]) => at >= start && at < end);
+    if (float === -1) {
+      index.labels.push({ key, rem, subject: subject ?? crossRefSubject(rem, code), inFloat: false });
+      continue;
+    }
+    const [start, end] = floats[float];
+    index.labels.push({
+      key,
+      rem,
+      subject: subject ?? crossRefSubject(rem, code.slice(start, end)),
+      inFloat: true,
+      float: `${rem._id} ${block ?? 0} ${float}`,
+    });
+  }
   // A reference in prose is named by the words around it, when it is reported (`textAroundForWarning`).
   const refSubject = subject ?? environmentSubject(code);
   for (const group of groups) {
@@ -2446,9 +2625,10 @@ async function reportCrossReferences(plugin: RNPlugin, context: Rem2TexConversio
   const floats = new Map<string, { rem: Rem; subject: string; keys: string[] }>();
   for (const label of index.labels) {
     if (!label.inFloat) continue;
-    const entry = floats.get(label.rem._id) ?? { rem: label.rem, subject: label.subject, keys: [] };
+    const id = label.float ?? label.rem._id;
+    const entry = floats.get(id) ?? { rem: label.rem, subject: label.subject, keys: [] };
     entry.keys.push(label.key);
-    floats.set(label.rem._id, entry);
+    floats.set(id, entry);
   }
   for (const float of floats.values()) {
     if (float.keys.some((key) => referenced.has(key))) continue;
@@ -2485,19 +2665,157 @@ function labelSlug(title: string): string {
 }
 
 /**
- * The label a heading gets when a pin in a reference points at it and it has none of its own:
- * `sec:` + its title as a slug, unique within this export. Recorded, so `applyHeadingLabels` writes
- * it after the heading's sectioning command.
+ * The paper `rem` sits in — strictly between its Preamble and End — with its layout, and the rems
+ * between `rem` and that paper (its parent first, the body rem last).
  */
-function headingLabelFor(heading: Rem, context: Rem2TexConversionContext): string | undefined {
+async function enclosingPaper(
+  plugin: RNPlugin,
+  rem: Rem
+): Promise<{ paperRem: Rem; layout: PaperLayout; ancestors: Rem[] } | undefined> {
+  let child = rem;
+  const ancestors: Rem[] = [];
+  for (let hops = 0; hops < 64 && child.parent; hops += 1) {
+    const parent = await plugin.rem.findOne(child.parent);
+    if (!parent) return undefined;
+    const layout = await findPaperLayout(plugin, parent);
+    if (layout?.bodyRems.some((body) => body._id === child._id)) return { paperRem: parent, layout, ancestors };
+    ancestors.push(parent);
+    child = parent;
+  }
+  return undefined;
+}
+
+/** What `headingLabelFor` needs of one paper, read once per export. */
+type PaperHeadingScan = {
+  /** Every body rem in outline order, with its title slug and whether its own text types a label. */
+  rems: Array<{ rem: Rem; slug: string; ownLabel: boolean }>;
+  /** Every `\label` typed anywhere in the paper — body, Preamble and End (End too: 2026-11-25, r2-02). */
+  typed: Set<string>;
+  /** The deepest level LaTeX numbers: the Preamble's `secnumdepth`, else the document class's default. */
+  secnumDepth: number;
+  /** Labels given out so far, by heading id; every label taken; the title stems already numbered. */
+  labels: Map<string, string>;
+  taken: Set<string>;
+  numbered: Set<string>;
+};
+
+/** `results-2-3` → `results`: headings whose labels could collide share a stem. */
+const slugStem = (slug: string): string => slug.replace(/(?:-\d+)+$/, '') || slug;
+
+/**
+ * Read a paper for its heading labels: its body in outline order (one `getChildrenRem` per rem —
+ * no `getFontSize`, which `headingLabelFor` asks only of the few headings that could collide:
+ * 2026-11-25, r2-13), every typed `\label`, and its `secnumdepth`. Cached per paper per export.
+ */
+function paperHeadingScan(
+  plugin: RNPlugin,
+  paper: { paperRem: Rem; layout: PaperLayout },
+  context: Rem2TexConversionContext
+): Promise<PaperHeadingScan> {
+  const index = context.crossRefs as Rem2TexCrossRefs;
+  const cached = index.paperHeadingLabels.get(paper.paperRem._id);
+  if (cached) return cached;
+  const computed = (async () => {
+    const scan: PaperHeadingScan = {
+      rems: [],
+      typed: new Set(),
+      secnumDepth: 3,
+      labels: new Map(),
+      taken: new Set(),
+      numbered: new Set(),
+    };
+    const ownLabels = (rem: Rem) =>
+      labelKeysIn(withoutLatexComments(`${ownLatexText(rem.text)}\n${ownLatexText(rem.backText)}`));
+    const visit = async (rem: Rem, body: boolean): Promise<void> => {
+      if (isRem2TexOutputRem(rem) || context.ignoredRemIds?.has(rem._id)) return;
+      const own = ownLabels(rem);
+      for (const key of own) scan.typed.add(key);
+      if (body) scan.rems.push({ rem, slug: labelSlug(ownLatexText(rem.text)) || rem._id, ownLabel: own.length > 0 });
+      for (const child of await rem.getChildrenRem()) await visit(child, body);
+    };
+    for (const rem of paper.layout.bodyRems) await visit(rem, true);
+    for (const child of await paper.layout.endRem.getChildrenRem()) await visit(child, false);
+    // The Preamble's own text decides what LaTeX numbers; its labels are taken too.
+    let preamble = '';
+    const readPreamble = async (rem: Rem): Promise<void> => {
+      preamble += `${ownLatexText(rem.text)}\n${ownLatexText(rem.backText)}\n`;
+      for (const key of ownLabels(rem)) scan.typed.add(key);
+      for (const child of await rem.getChildrenRem()) await readPreamble(child);
+    };
+    for (const child of await paper.layout.preambleRem.getChildrenRem()) await readPreamble(child);
+    const code = withoutLatexComments(preamble);
+    const depths = [...code.matchAll(/\\setcounter\s*\{\s*secnumdepth\s*\}\s*\{\s*(-?\d+)\s*\}/g)];
+    const documentClass = /\\documentclass\s*(?:\[[^\]]*\])?\s*\{\s*([^}\s]*)\s*\}/.exec(code)?.[1] ?? '';
+    scan.secnumDepth = depths.length
+      ? Number(depths[depths.length - 1][1])
+      : /^(?:report|book|memoir|scrbook|scrreprt|amsbook)$/.test(documentClass)
+      ? 2
+      : 3;
+    for (const key of scan.typed) scan.taken.add(key);
+    return scan;
+  })();
+  index.paperHeadingLabels.set(paper.paperRem._id, computed);
+  return computed;
+}
+
+/**
+ * The label a heading gets when a pin in a reference points at it and it has none of its own: `sec:`
+ * + its title slug, numbered `-2`, `-3` … in outline order among the paper's headings with the same
+ * title stem, every `\label` typed in the paper skipped. It depends on the paper alone, so the
+ * paper, Paragraph and Selection exports agree (2026-11-25, findings 08 and 09). A heading LaTeX
+ * does not number — a typed `\section*{…}`, or one deeper than the paper's `secnumdepth` — gets
+ * none: `\ref` to its label would print the number of whatever came before (r2-12). Outside a
+ * paper: `sec:` + the slug, unique within this export. Recorded, so `applyHeadingLabels` writes it
+ * after the heading's sectioning command.
+ */
+async function headingLabelFor(
+  plugin: RNPlugin,
+  heading: Rem,
+  context: Rem2TexConversionContext
+): Promise<string | undefined> {
   const index = context.crossRefs;
   if (!index) return undefined;
   const existing = index.headingLabels.get(heading._id);
   if (existing) return existing;
-  const slug = labelSlug(ownLatexText(heading.text)) || heading._id;
-  const taken = new Set(index.headingLabels.values());
-  let label = `sec:${slug}`;
-  for (let n = 2; taken.has(label); n += 1) label = `sec:${slug}-${n}`;
+  const title = ownLatexText(heading.text).trim();
+  const unnumbered = (): undefined => {
+    index.unnumberedHeadings.add(heading._id);
+    return undefined;
+  };
+  if (/^\\(?:section|subsection|subsubsection|paragraph|subparagraph)\s*\*/.test(title)) return unnumbered();
+
+  let label: string | undefined;
+  const paper = await enclosingPaper(plugin, heading);
+  const scan = paper ? await paperHeadingScan(plugin, paper, context) : undefined;
+  const entry = scan?.rems.find((candidate) => candidate.rem._id === heading._id);
+  if (paper && scan && entry) {
+    let level = typedSectioningCommand(title)?.level;
+    if (level === undefined) {
+      level = 1;
+      for (const ancestor of paper.ancestors) if ((await ancestor.getFontSize()) !== undefined) level += 1;
+      level = Math.min(level, HEADING_COMMANDS.length);
+    }
+    if (level > scan.secnumDepth) return unnumbered();
+    const stem = slugStem(entry.slug);
+    if (!scan.numbered.has(stem)) {
+      scan.numbered.add(stem);
+      for (const candidate of scan.rems) {
+        if (candidate.ownLabel || slugStem(candidate.slug) !== stem) continue;
+        if ((await candidate.rem.getFontSize()) === undefined) continue;
+        let next = `sec:${candidate.slug}`;
+        for (let n = 2; scan.taken.has(next); n += 1) next = `sec:${candidate.slug}-${n}`;
+        scan.taken.add(next);
+        scan.labels.set(candidate.rem._id, next);
+      }
+    }
+    label = scan.labels.get(heading._id);
+  }
+  if (!label) {
+    const slug = labelSlug(title) || heading._id;
+    const taken = new Set(index.headingLabels.values());
+    label = `sec:${slug}`;
+    for (let n = 2; taken.has(label); n += 1) label = `sec:${slug}-${n}`;
+  }
   index.headingLabels.set(heading._id, label);
   return label;
 }
@@ -2550,7 +2868,7 @@ async function labelOfRem(
     label = lastLabelIn(blocks.join('\n'));
   }
   if (!label) label = lastLabelIn(`${ownLatexText(target.text)}\n${ownLatexText(target.backText)}`);
-  if (!label && (await target.getFontSize()) !== undefined) label = headingLabelFor(target, context);
+  if (!label && (await target.getFontSize()) !== undefined) label = await headingLabelFor(plugin, target, context);
   return label;
 }
 
@@ -2581,7 +2899,7 @@ function referenceItemAround(proj: string, group: ReferenceGroup, offset: number
  * in one item of a cleveref list — replaced by its target's label; undefined when nothing changes.
  * One that cannot be filled in is left out, as a pin is anywhere else, and the Log says why: an
  * inline reference would otherwise put its target's whole text inside the braces, and a Zotero pin
- * a `\cite{…}` (`\ref{\cite{key}}`). A deleted target is `reportDanglingReferences`' business.
+ * a `\cite{…}` (`\ref{\cite{key}}`). A deleted target is left out too, with a warning of its own.
  */
 async function substituteLabelPins(
   plugin: RNPlugin,
@@ -2610,7 +2928,32 @@ async function substituteLabelPins(
     }
     if (!group) continue;
     const target = await plugin.rem.findOne(element._id as string);
-    if (!target || (await isBookkeepingRem(target))) continue;
+    if (!target) {
+      // A deleted target has no label to read, so it is left out like any pin that cannot be filled
+      // in. Left to the flattener, a deleted Zotero item came back as `\cite{key}` INSIDE the braces
+      // (`\ref{\cite{key}}` stops LaTeX), and an inline reference put its remembered text there
+      // (2026-11-25).
+      result = result ?? [...text];
+      result[index] = '';
+      context.crossRefs?.unfilled.add(`${rem._id} ${group.command}`);
+      const warningKey = `${group.open} deleted`;
+      if (!context.log || warned.has(warningKey)) continue;
+      warned.add(warningKey);
+      const { remembered, citekey } = deletedReferenceTarget(element);
+      context.log.warn({
+        reason: citekey
+          ? `A pin inside \\${group.command}{…} points at a Zotero item that no longer exists. A work is ` +
+            'cited with \\cite{…}, not referenced, so the pin was left out.'
+          : `A pin inside \\${group.command}{…} points at a rem that no longer exists, so the reference ` +
+            'was left empty and the PDF will print “??”.',
+        subject: `Rem "${pinContextForWarning(text, index)}"`,
+        path: await parentPathForWarning(plugin, rem, context),
+        quotesLabel: 'the deleted rem was',
+        quotes: [`"${(remembered || '(no remembered text)').slice(0, WARNING_QUOTE_MAX)}"`],
+      });
+      continue;
+    }
+    if (await isBookkeepingRem(target)) continue;
 
     const zoteroItem = await findZoteroItemDoc(plugin, target);
     const item = referenceItemAround(proj, group, offset);
@@ -2638,6 +2981,16 @@ async function substituteLabelPins(
         path,
         quotesLabel: 'it points at',
         quotes: [`"${displayTitleForWarning(zoteroItem, WARNING_SUBJECT_MAX)}"`],
+      });
+    } else if (alone && context.crossRefs?.unnumberedHeadings.has(target._id)) {
+      context.log.warn({
+        reason:
+          `A pin inside \\${group.command}{…} points at a heading LaTeX does not number (a starred \\section*, or a ` +
+          'level deeper than secnumdepth), so \\ref would print the number of something else. The reference was left empty.',
+        subject,
+        path,
+        quotesLabel: 'it points at',
+        quotes: [headingSubject(target)],
       });
     } else if (alone) {
       context.log.warn({
@@ -2672,6 +3025,7 @@ async function getRemBodyText(
     hierarchyRemIds: context.hierarchyRemIds,
     log: context.log,
     citationItemDocs: context.citationItemDocs,
+    selfRemId: rem._id,
   });
 
   // Only treat content as raw code when the code-only extraction matches
@@ -2973,7 +3327,8 @@ async function reportDanglingReferences(
   if (!log) return;
   const dangling = log.takeDanglingReferences();
   if (dangling.length === 0) return;
-  const path = shortenPathForWarning(await safeHierarchyPath(plugin, rem, context));
+  // The subject names the rem, so the path stops at its parent (2026-11-25: it repeated the rem).
+  const path = await parentPathForWarning(plugin, rem, context);
   const subject = `Rem "${displayTitleForWarning(rem, WARNING_SUBJECT_MAX)}"`;
   for (const entry of dangling) {
     log.warn(
@@ -3087,6 +3442,9 @@ async function serializeNode(
     if (await shouldExportTodoAsComment(rem, context)) {
       if (context.log) context.log.counts.todoComments += 1;
       output.push(await todoComment(plugin, rem, context));
+      // Reported against THIS rem, before its children are read (2026-11-25, r2-11: these went to
+      // the next prose rem, or were lost when none followed).
+      await reportDanglingReferences(plugin, rem, context);
       await emitTodoChildrenAsCommentTree(plugin, rem, output, context, 1);
     } else {
       await noteSkippedTodo(plugin, rem, context);
@@ -3106,9 +3464,11 @@ async function serializeNode(
     const ownCaption = (await richTextToString(plugin, rem.text, {
       hierarchyRemIds: context.hierarchyRemIds,
       log: context.log,
+      selfRemId: rem._id,
     }))
       .replace(/\s+/g, ' ')
       .trim();
+    await reportDanglingReferences(plugin, rem, context);
     if (context.log && (nonMediaChildren.length > 0 || ownCaption)) {
       const imageTitle = displayTitleForWarning(rem, WARNING_SUBJECT_MAX);
       const titled = imageTitle !== '(untitled)';
@@ -3163,11 +3523,12 @@ async function serializeNode(
       return;
     }
     if (context.log) context.log.counts.mediaBlocks += mediaBlocks.length;
-    for (const mediaBlock of mediaBlocks) {
+    // Each block is numbered, so two floats in two blocks under one image rem count apart (r2-05).
+    mediaBlocks.forEach((mediaBlock, block) => {
       output.push(mediaBlock);
-      noteCrossReferences(rem, mediaBlock, context);
+      noteCrossReferences(rem, mediaBlock, context, undefined, block);
       output.push('');
-    }
+    });
     return;
   }
 
@@ -3176,6 +3537,7 @@ async function serializeNode(
   if (!isHeading && isCommentRem(rem)) {
     if (context.log) context.log.counts.commentRems += 1;
     output.push(await commentRemLines(plugin, rem, context));
+    await reportDanglingReferences(plugin, rem, context);
     await emitTodoChildrenAsCommentTree(plugin, rem, output, context, 1);
     return;
   }
@@ -3228,7 +3590,8 @@ async function serializeNode(
               `than wrapped again — but its depth in the outline implies \\${command}. Move the rem, or ` +
               `change the command, so the two agree.`,
             subject: `Heading rem`,
-            path: shortenPathForWarning(await safeHierarchyPath(plugin, rem, context)),
+            // The quote names the heading, so the path stops at its parent (2026-11-25).
+            path: await parentPathForWarning(plugin, rem, context),
             quotesLabel: 'as typed',
             quotes: [`"${title.trim().slice(0, WARNING_QUOTE_MAX)}"`],
           });
@@ -3243,7 +3606,7 @@ async function serializeNode(
       context.log.warn({
         reason: `This heading rem has no title, so no \\${command} was emitted — but its children were exported.`,
         subject: 'Heading rem',
-        path: shortenPathForWarning(await safeHierarchyPath(plugin, rem, context)),
+        path: await parentPathForWarning(plugin, rem, context),
       });
     }
 
@@ -3252,7 +3615,7 @@ async function serializeNode(
     const nextSubsectionTitle =
       headingLevel === 1 ? undefined : headingLevel === 2 ? title : currentSubsectionTitle;
     for (const child of children) {
-      if (isTodo && (await isTodoHeadingMetadataChild(child))) {
+      if (isTodo && (await isTodoHeadingMetadataChild(plugin, child))) {
         continue;
       }
       try {
@@ -3800,6 +4163,16 @@ const BIBLIOGRAPHY_HEADING = '% ---------------- Bibliography ----------------';
  * One `[n] …` entry in biblatex's `numeric` shape, reduced to the fields Remzot stores (it keeps no
  * volume, issue, pages or ISSN, so those parts of a full biblatex entry can never appear here).
  */
+/**
+ * A DOI or an address as plain text that prints exactly as written: the plain escaper, plus a `~`
+ * (a tie, which prints as a space) and `--` (an en dash) made literal (2026-11-25).
+ */
+function escapeAddressForBibliography(address: string): string {
+  return escapePlainTextSegment(address)
+    .replace(/~/g, '\\textasciitilde{}')
+    .replace(/-(?=-)/g, '-{}');
+}
+
 function formatBibliographyEntry(number: number, entry: Rem2TexBibliographyEntry): string {
   if (isEmptyBibliographyEntry(entry)) {
     // Both halves are escaped: this note is visible document text, not a comment, so a citekey
@@ -3838,10 +4211,10 @@ function formatBibliographyEntry(number: number, entry: Rem2TexBibliographyEntry
   // plain escaper keeps the literal intact while still making `_`, `%` and `&` compile.
   if (entry.doi) {
     builder.newunit();
-    builder.emit(`doi: ${escapePlainTextSegment(entry.doi)}`);
+    builder.emit(`doi: ${escapeAddressForBibliography(entry.doi)}`);
   } else if (entry.link) {
     builder.newunit();
-    builder.emit(`url: ${escapePlainTextSegment(entry.link)}`);
+    builder.emit(`url: ${escapeAddressForBibliography(entry.link)}`);
   }
   return `[${number}] ${builder.finish()}`;
 }
@@ -3861,9 +4234,45 @@ function formatBibliography(entries: Rem2TexBibliographyEntry[]): string {
   return lines.join('\n');
 }
 
-/** Index of the first `%` that really opens a LaTeX comment (a `\%` written by the escaper is not). */
+/**
+ * Commands whose argument TeX reads verbatim, so a `%` in it is a character rather than a comment:
+ * `\url{https://example.org/data%20set}` (2026-11-25). `\href` reads only its FIRST argument so.
+ */
+const VERBATIM_ARGUMENT_COMMANDS = new Set(['url', 'path', 'nolinkurl', 'href']);
+
+/** The `}` closing the group opened at `open`: braces counted, backslashes not (the text is verbatim). */
+function verbatimGroupEnd(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i += 1) {
+    if (text[i] === '{') depth += 1;
+    else if (text[i] === '}' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * Index of the first `%` that really opens a LaTeX comment. A `\%` written by the escaper does not,
+ * and neither does one inside a verbatim argument (`\url{…}`, `\href{…}`, `\verb|…|`): until
+ * 2026-11-25 such a `%` hid every citation and reference after it on the line.
+ */
 function firstCommentIndex(line: string): number {
   for (let i = 0; i < line.length; i += 1) {
+    if (line[i] === '\\' && !isEscaped(line, i)) {
+      let end = i + 1;
+      while (end < line.length && /[A-Za-z]/.test(line[end])) end += 1;
+      const name = line.slice(i + 1, end);
+      let skipTo = -1;
+      if (name === 'verb') {
+        const open = line[end] === '*' ? end + 1 : end;
+        const delimiter = line[open];
+        if (delimiter && !/[\sA-Za-z*]/.test(delimiter)) skipTo = line.indexOf(delimiter, open + 1);
+      } else if (VERBATIM_ARGUMENT_COMMANDS.has(name) && line[end] === '{') {
+        skipTo = verbatimGroupEnd(line, end);
+      }
+      if (skipTo !== -1) i = skipTo;
+      else if (end > i + 1) i = end - 1;
+      continue;
+    }
     if (line[i] === '%' && !isEscaped(line, i)) return i;
   }
   return -1;
@@ -3883,7 +4292,45 @@ const NON_NUMERIC_CITE_COMMANDS = new Set([
   'citetitle',
   'Citeauthor',
   'Citeyear',
+  // A whole bibliography entry in the text, not a label: kept as typed too (2026-11-25).
+  'fullcite',
+  'footfullcite',
 ]);
+
+/**
+ * Commands that print the AUTHOR and the number in a numeric style ("Doe [1]"; `\citealt` without
+ * the brackets), mapped to the author command that stands in for the name. Each becomes, per key,
+ * `\citeauthor{key} [n]`, so the name the sentence is built around stays — kept as typed LaTeX, as
+ * `NON_NUMERIC_CITE_COMMANDS` keeps `\citeauthor`. Until 2026-11-25 they printed a bare `[1]`.
+ */
+const AUTHOR_NUMBER_CITE_COMMANDS = new Map([
+  ['textcite', 'citeauthor'],
+  ['Textcite', 'Citeauthor'],
+  ['citet', 'citeauthor'],
+  ['Citet', 'Citeauthor'],
+  ['citealt', 'citeauthor'],
+  ['Citealt', 'Citeauthor'],
+]);
+
+/** `\textcite[see][p. 3]{a, b}` → `\citeauthor{a} [see 1]; \citeauthor{b} [2, p. 3]`. */
+function renderAuthorNumberCitation(
+  command: string,
+  starred: boolean,
+  cited: Array<{ key: string; number: number }>,
+  options: string[]
+): string {
+  const author = `\\${AUTHOR_NUMBER_CITE_COMMANDS.get(command) ?? 'citeauthor'}${starred ? '*' : ''}`;
+  const prenote = options.length > 1 ? options[0].trim() : '';
+  const postnote = options.length > 0 ? options[options.length - 1].trim() : '';
+  return cited
+    .map(({ key, number }, index) => {
+      let label = String(number);
+      if (index === 0 && prenote) label = `${prenote} ${label}`;
+      if (index === cited.length - 1 && postnote) label = `${label}, ${postnote}`;
+      return `${author}{${key}} ${command.toLowerCase() === 'citealt' ? label : `[${label}]`}`;
+    })
+    .join('; ');
+}
 
 /** What a citation command becomes once its keys are numbers. */
 function renderCitationNumbers(command: string, numbers: number[], options: string[]): string {
@@ -3902,16 +4349,53 @@ function renderCitationNumbers(command: string, numbers: number[], options: stri
   return command === 'supercite' ? `\\textsuperscript{[${label}]}` : `[${label}]`;
 }
 
+/** A masked comment character (see `maskLatexComments`). */
+const COMMENT_MASK = '';
+/** A paragraph break: no argument of `\cite` (not `\long`) runs across one. */
+const BLANK_LINE = /(?:\r\n?|\n)[ \t]*(?:\r\n?|\n)/;
+
 /**
- * Rewrite every citation command in one stretch of LaTeX. `numberFor` returns undefined to decline
- * a key, and a command with any declined key is left exactly as it was.
+ * `latex` with every comment — from its line's first real `%` to the end of the line, a line ending
+ * at LF, CRLF or a lone CR — masked character for character, and where each comment sits. Offsets in
+ * the masked text are offsets in `latex`. Splitting at `\n` alone let `% note⏎\cite{k}` written with
+ * a lone CR hide the citation after it (2026-11-25, r2-08).
  */
-function replaceCitationsInCode(
+function maskLatexComments(latex: string): { masked: string; comments: Array<[number, number]> } {
+  const comments: Array<[number, number]> = [];
+  let masked = '';
+  let offset = 0;
+  latex.split(/(\r\n?|\n)/).forEach((piece, index) => {
+    const commentAt = index % 2 === 0 ? firstCommentIndex(piece) : -1;
+    if (commentAt === -1) {
+      masked += piece;
+    } else {
+      masked += piece.slice(0, commentAt) + COMMENT_MASK.repeat(piece.length - commentAt);
+      comments.push([offset + commentAt, offset + piece.length]);
+    }
+    offset += piece.length;
+  });
+  return { masked, comments };
+}
+
+type CitationReplacement = { start: number; end: number; replacement: string };
+
+/**
+ * Every citation command in `text` that becomes numbers: the span it covers and its replacement.
+ * `numberFor` returns undefined to decline a key, and a command with any declined key is left as
+ * typed. `inBody` is false in a comment, which never numbers anything new. A masked comment inside
+ * an argument is ignored, so a key list may wrap across one. Verbatim material (`\verb|…|`, `\url{…}`
+ * and the other `VERBATIM_ARGUMENT_COMMANDS`) is skipped whole, and an argument running across a
+ * blank line is no argument: `\verb|\cite{|` … `\verb|}|` was read as one key list, deleting the
+ * prose between (2026-11-25, r2-14).
+ */
+function citationReplacements(
   text: string,
-  numberFor: (key: string) => number | undefined
-): string {
-  if (!text.includes('\\')) return text;
-  let result = '';
+  numberFor: (key: string) => number | undefined,
+  inBody = true
+): CitationReplacement[] {
+  const replacements: CitationReplacement[] = [];
+  if (!text.includes('\\')) return replacements;
+  const unmasked = (part: string) => part.split(COMMENT_MASK).join('');
   let cursor = 0;
 
   while (cursor < text.length) {
@@ -3921,74 +4405,92 @@ function replaceCitationsInCode(
     let nameEnd = slash + 1;
     while (nameEnd < text.length && /[A-Za-z]/.test(text[nameEnd])) nameEnd += 1;
     const name = text.slice(slash + 1, nameEnd);
-
-    if (!CITATION_WRAPPER_COMMANDS.has(name) || isEscaped(text, slash)) {
-      result += text.slice(cursor, slash + 1);
+    if (isEscaped(text, slash)) {
       cursor = slash + 1;
+      continue;
+    }
+    if (name === 'verb') {
+      const open = text[nameEnd] === '*' ? nameEnd + 1 : nameEnd;
+      const delimiter = text[open];
+      const close = delimiter && !/[\sA-Za-z*]/.test(delimiter) ? text.indexOf(delimiter, open + 1) : -1;
+      cursor = close === -1 ? nameEnd : close + 1;
+      continue;
+    }
+    if (VERBATIM_ARGUMENT_COMMANDS.has(name) && text[nameEnd] === '{') {
+      const close = verbatimGroupEnd(text, nameEnd);
+      cursor = close === -1 ? nameEnd : close + 1;
+      continue;
+    }
+    if (!CITATION_WRAPPER_COMMANDS.has(name)) {
+      cursor = Math.max(nameEnd, slash + 1);
       continue;
     }
 
     let argStart = nameEnd;
-    if (text[argStart] === '*') argStart += 1;
+    const starred = text[argStart] === '*';
+    if (starred) argStart += 1;
     const options: string[] = [];
     while (text[argStart] === '[') {
       const optionEnd = findMatchingGroup(text, argStart, '[', ']');
       if (optionEnd === -1) break;
-      options.push(text.slice(argStart + 1, optionEnd - 1));
+      options.push(unmasked(text.slice(argStart + 1, optionEnd - 1)));
       argStart = optionEnd;
     }
     if (text[argStart] !== '{') {
-      result += text.slice(cursor, argStart);
       cursor = argStart;
       continue;
     }
     const argEnd = findMatchingGroup(text, argStart, '{', '}');
-    if (argEnd === -1) {
-      result += text.slice(cursor, argStart + 1);
+    if (argEnd === -1 || BLANK_LINE.test(text.slice(slash, argEnd))) {
       cursor = argStart + 1;
       continue;
     }
 
-    const cited = text
-      .slice(argStart + 1, argEnd - 1)
+    const cited = unmasked(text.slice(argStart + 1, argEnd - 1))
       .split(',')
       .map((key) => key.trim())
       .filter((key) => key.length > 0);
+    // `\cite{}` — an author-typed wrapper whose pin never resolved — stays visible as typed.
     if (cited.length === 0) {
-      // `\cite{}` — an author-typed wrapper whose pin never resolved. Leave it visible.
-      result += text.slice(cursor, argEnd);
       cursor = argEnd;
       continue;
     }
 
+    // `\nocite{*}` asks for EVERY entry of a bibliography database, which this export does not
+    // have: it prints nothing, and `*` is no citekey to number (2026-11-25: it took [1] and an entry
+    // of its own). A `*` anywhere else is LaTeX Rem2Tex does not understand: left as typed.
     const seen = new Set<string>();
-    const numbers: number[] = [];
-    let declined = false;
+    const numbered: Array<{ key: string; number: number }> = [];
+    let declined = cited.includes('*') && !(inBody && name === 'nocite');
     for (const key of cited) {
-      if (seen.has(key)) continue;
+      if (declined) break;
+      if (key === '*' || seen.has(key)) continue;
       seen.add(key);
       const number = numberFor(key);
       if (number === undefined) {
         declined = true;
         break;
       }
-      numbers.push(number);
+      numbered.push({ key, number });
     }
     // A declined key (comment pass, key not cited in the body) or a command that prints words:
-    // re-emit exactly what the author typed.
-    if (declined || NON_NUMERIC_CITE_COMMANDS.has(name)) {
-      result += text.slice(cursor, argEnd);
-      cursor = argEnd;
-      continue;
+    // the author's text stays exactly as typed.
+    if (!declined && !NON_NUMERIC_CITE_COMMANDS.has(name)) {
+      replacements.push({
+        start: slash,
+        end: argEnd,
+        replacement: AUTHOR_NUMBER_CITE_COMMANDS.has(name)
+          ? renderAuthorNumberCitation(name, starred, numbered, options)
+          : renderCitationNumbers(
+              name,
+              numbered.map((citation) => citation.number),
+              options
+            ),
+      });
     }
-
-    result += text.slice(cursor, slash);
-    result += renderCitationNumbers(name, numbers, options);
     cursor = argEnd;
   }
-
-  result += text.slice(cursor);
-  return result;
+  return replacements;
 }
 
 /**
@@ -4012,20 +4514,29 @@ export function renumberCitations(latex: string): { latex: string; keys: string[
   };
   const existingNumber = (key: string): number | undefined => numbers.get(key);
 
-  // Two passes: every body citation is numbered first, so the comment pass can tell a work the
-  // document really cites from one that only a comment mentions.
-  const split = latex.split('\n').map((line) => {
-    const commentAt = firstCommentIndex(line);
-    return commentAt === -1
-      ? { code: line, comment: '' }
-      : { code: line.slice(0, commentAt), comment: line.slice(commentAt) };
-  });
-
-  const code = split.map((line) => replaceCitationsInCode(line.code, assignNumber));
-  return {
-    latex: split.map((line, i) => code[i] + replaceCitationsInCode(line.comment, existingNumber)).join('\n'),
-    keys,
-  };
+  // Two passes: every body citation is numbered first — over the whole document with its comments
+  // masked, so a key list may wrap across lines, and even across a comment, as LaTeX allows — and
+  // then each comment that no replaced command swallowed shows the numbers the body gave.
+  const { masked, comments } = maskLatexComments(latex);
+  const body = citationReplacements(masked, assignNumber);
+  const swallowed = ([start, end]: [number, number]) =>
+    body.some((replacement) => start >= replacement.start && end <= replacement.end);
+  const inComments = comments
+    .filter((comment) => !swallowed(comment))
+    .flatMap(([start, end]) =>
+      citationReplacements(latex.slice(start, end), existingNumber, false).map((replacement) => ({
+        ...replacement,
+        start: replacement.start + start,
+        end: replacement.end + start,
+      }))
+    );
+  let result = '';
+  let cursor = 0;
+  for (const replacement of [...body, ...inComments].sort((a, b) => a.start - b.start)) {
+    result += latex.slice(cursor, replacement.start) + replacement.replacement;
+    cursor = replacement.end;
+  }
+  return { latex: result + latex.slice(cursor), keys };
 }
 
 /**
@@ -4356,7 +4867,7 @@ function projectRichText(text: unknown[]): { proj: string; at: number[] } {
 
 /**
  * Every citation command in the projection, found with the same escape-aware scanner shape as
- * `replaceCitationsInCode` — deliberately not a `\{([^}]*)\}` regex, which mis-matches the outer
+ * `citationReplacements` — deliberately not a `\{([^}]*)\}` regex, which mis-matches the outer
  * opener against inner content on `\cite{\cite{k}}`.
  */
 function findProjectedCitationCommands(
@@ -4433,7 +4944,14 @@ export type Rem2TexCiteTarget = { itemDocId: string; key: string };
  */
 export function rewriteRichTextWithCitekeys(
   text: unknown[],
-  citeTargetFor: (remId: string) => Rem2TexCiteTarget | undefined
+  citeTargetFor: (remId: string) => Rem2TexCiteTarget | undefined,
+  options: {
+    /**
+     * The rem is exported as a `%` comment (a todo, a `%` rem), where a pin to a todo or a figure
+     * shows its target's text instead of vanishing: no pin is invisible there (2026-11-25, r2-04).
+     */
+    pinsRenderAsText?: boolean;
+  } = {}
 ): unknown[] | undefined {
   if (!Array.isArray(text) || text.length === 0) return undefined;
   // A rem holding any code element is never touched: surgery is riskiest where code and prose mix,
@@ -4442,11 +4960,15 @@ export function rewriteRichTextWithCitekeys(
     return undefined;
   }
 
-  const refs = new Map<number, { isPin: boolean; target?: Rem2TexCiteTarget }>();
+  const refs = new Map<number, { isPin: boolean; target?: Rem2TexCiteTarget; recovered?: boolean }>();
   text.forEach((element, index) => {
     const entry = (element ?? {}) as Record<string, unknown>;
     if (entry.i !== 'q' || typeof entry._id !== 'string') return;
-    refs.set(index, { isPin: entry.pin === true, target: citeTargetFor(entry._id) });
+    const target = citeTargetFor(entry._id);
+    // A reference to a DELETED Zotero item has no target, yet the exporter recovers its citation from
+    // the breadcrumb (`resolveDeletedReference`), so it is visible text, never a gap (r2-03).
+    const recovered = !target && entry.textOfDeletedRem !== undefined && !!deletedReferenceTarget(entry).citekey;
+    refs.set(index, { isPin: entry.pin === true, target, recovered });
   });
   const allPins = [...refs.entries()].filter(([, r]) => r.isPin && r.target).map(([i]) => i);
   if (allPins.length === 0) return undefined;
@@ -4547,7 +5069,9 @@ export function rewriteRichTextWithCitekeys(
   // reference (it reads as its target's text), not a Zotero reference (its own \cite): moving a pin
   // across any of those moves its citation in the PDF (2026-11-24).
   const invisibleAt = new Set<number>();
-  for (const [index, r] of refs) if (r.isPin && !r.target) invisibleAt.add(projOf(index));
+  if (!options.pinsRenderAsText) {
+    for (const [index, r] of refs) if (r.isPin && !r.target && !r.recovered) invisibleAt.add(projOf(index));
+  }
   const gapBlank = (from: number, to: number) => {
     for (let k = from; k < to; k += 1) {
       if (/\s/.test(proj[k]) || invisibleAt.has(k)) continue;
@@ -4572,9 +5096,18 @@ export function rewriteRichTextWithCitekeys(
     const after = commands.find(
       (c) => c.start > projOf(last) && gapBlank(projOf(last) + widthOf(last), c.start) && canAbsorb(c)
     );
-    const anchor = before ?? after;
+    let anchor = before ?? after;
     // A run that sits BEFORE its command keeps its place in the key list.
     const prepend = !before && !!after;
+    // A run BEFORE its command that holds a pin the command already names as TEXT (which stays put)
+    // and pins it does not (which would move in behind it) would come out reordered:
+    // `⟨pin B⟩ ⟨pin A⟩ \cite{a}` exported `\cite{b, a}` and after the move `\cite{a, b}` (r2-06). Such a
+    // run gets a `\cite{…}` of its own instead, which the exporter merges in reading order.
+    if (anchor && prepend) {
+      const keysOf = run.indices.map((i) => refs.get(i)!.target!.key);
+      const named = anchor.keys;
+      if (keysOf.some((key) => named.includes(key)) && keysOf.some((key) => !named.includes(key))) anchor = undefined;
+    }
 
     // One reference per PAPER, carrying every pin of that paper — so a work pinned twice shows one
     // citekey with both pins beside it, while different works stay visually separated.
@@ -4922,8 +5455,10 @@ export type Rem2TexPinRow = {
   remId: string;
   title: string;
   path: string;
-  /** Citekeys that would be written into this rem. */
+  /** Citekeys that would be written into this rem — only those the rewrite really adds. */
   keys: string[];
+  /** Zotero pins in this rem that the rewrite converts: given a key, or a key they share. */
+  pins: number;
   before: unknown[];
   after: unknown[];
   /** Readable one-liners for the popup, pins shown as ⟨pin⟩ and written keys inline. */
@@ -5000,6 +5535,49 @@ function previewRichText(text: unknown[], keyOf: (remId: string) => string | und
  * The walk is recursive through `getChildrenRem` (not `getDescendants`) so a skipped rem takes its
  * subtree with it, exactly as the exporter does.
  */
+/** How many key references — non-pin references to a work's own item doc — `rich` holds, per item doc. */
+function keyReferenceCounts(
+  rich: unknown[],
+  targets: Map<string, Rem2TexCiteTarget | undefined>
+): Map<string, number> {
+  const itemDocIds = new Set([...targets.values()].flatMap((target) => (target ? [target.itemDocId] : [])));
+  const counts = new Map<string, number>();
+  for (const element of rich) {
+    const entry = (element ?? {}) as Record<string, unknown>;
+    if (entry.i !== 'q' || entry.pin === true || typeof entry._id !== 'string' || !itemDocIds.has(entry._id)) continue;
+    counts.set(entry._id, (counts.get(entry._id) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Zotero pins already converted: inside a citation command's braces that name their work, as text or
+ * as a key reference — the test the rewrite itself applies. Counting only a pin right after its key
+ * missed `\cite{⟨ref⟩⟨pin⟩ ⟨pin⟩}`'s second pin and a pin after an inline mention (r2-07).
+ */
+function convertedPinCount(rich: unknown[], targets: Map<string, Rem2TexCiteTarget | undefined>): number {
+  const { proj, at } = projectRichText(rich);
+  const commands = findProjectedCitationCommands(proj);
+  if (!commands) return 0;
+  const inside = (index: number, command: ProjectedCommand) => at[index] > command.argOpen && at[index] < command.argClose;
+  let count = 0;
+  rich.forEach((element, index) => {
+    const entry = (element ?? {}) as Record<string, unknown>;
+    if (entry.i !== 'q' || entry.pin !== true || typeof entry._id !== 'string') return;
+    const target = targets.get(entry._id);
+    const host = target ? commands.find((command) => inside(index, command)) : undefined;
+    if (!target || !host) return;
+    const named =
+      host.keys.includes(target.key) ||
+      rich.some((other, i) => {
+        const o = (other ?? {}) as Record<string, unknown>;
+        return o.i === 'q' && o.pin !== true && o._id === target.itemDocId && inside(i, host);
+      });
+    if (named) count += 1;
+  });
+  return count;
+}
+
 export async function planCitekeyRewrite(
   plugin: RNPlugin,
   roots: Rem[],
@@ -5024,11 +5602,26 @@ export async function planCitekeyRewrite(
         if (entry.i !== 'q' || typeof entry._id !== 'string') continue;
         if (!targets.has(entry._id)) targets.set(entry._id, await resolveCiteTarget(plugin, entry._id, context));
       }
-      const after = rewriteRichTextWithCitekeys(text, (id) => targets.get(id));
+      // A todo or a `%` rem is exported as a comment, where a pin to a todo or a figure reads as text.
+      const hasCitePin = text.some((element) => {
+        const entry = (element ?? {}) as Record<string, unknown>;
+        return entry.i === 'q' && entry.pin === true && typeof entry._id === 'string' && !!targets.get(entry._id);
+      });
+      const pinsRenderAsText =
+        hasCitePin && (isCommentRem(rem) || ((await rem.isTodo()) && (await rem.getFontSize()) === undefined));
+      const after = rewriteRichTextWithCitekeys(text, (id) => targets.get(id), { pinsRenderAsText });
       if (after) {
         const keyOf = (id: string) => targets.get(id)?.key;
+        // What the rewrite really adds: a key reference to each work it writes a citekey for. Every
+        // target of the rem used to be listed, so a pin already converted, or a plain mention of a
+        // work, showed as "+ key" with nothing written for it (2026-11-25).
+        const before = keyReferenceCounts(text, targets);
+        const added = keyReferenceCounts(after, targets);
         const written: string[] = [];
-        for (const t of targets.values()) if (t && !written.includes(t.key)) written.push(t.key);
+        for (const target of targets.values()) {
+          if (!target || written.includes(target.key)) continue;
+          if ((added.get(target.itemDocId) ?? 0) > (before.get(target.itemDocId) ?? 0)) written.push(target.key);
+        }
         for (const key of written) if (!keys.includes(key)) keys.push(key);
         const title = (flattenRawTitleText(text).replace(/\s+/g, ' ').trim() || '(untitled)').slice(0, 80);
         rows.push({
@@ -5036,6 +5629,7 @@ export async function planCitekeyRewrite(
           title,
           path: path.join(' › '),
           keys: written,
+          pins: convertedPinCount(after, targets) - convertedPinCount(text, targets),
           before: text,
           after,
           previewBefore: previewRichText(text, keyOf),

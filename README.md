@@ -159,7 +159,10 @@ spaces go too, as they do when the export merges two citations. In every other c
 - next to any other command (`\nocite`, `\citeauthor`, `\citep`, `\cite*`, …);
 - next to a `\cite` with a page note: `\cite[p. 3]{smith2020}` beside a pin for another paper, so
   the "p. 3" never spreads to a work you did not apply it to;
-- when words, maths or a reference stand between the pin and the `\cite`.
+- when words, maths, a reference, or a pin that prints something stand between the pin and the
+  `\cite` — a pin to a deleted Zotero item still prints its citation, and in a todo or `%` line
+  every pin shows its target's text;
+- when the pins sit before a `\cite{…}` that already names one of their papers as typed text.
 
 Folding the pin into any of these would change the PDF.
 
@@ -188,20 +191,25 @@ LaTeX         As Figure~\ref{fig:setup} shows, the signal doubles.
 Rem2Tex fills in the `\label` of the rem the pin points at, so you never type a label, and changing a
 label in its figure changes every pinned reference to it at the next export. This works in all three
 exports and with every reference command: `\ref`, `\eqref`, `\pageref`, `\autoref`, `\nameref`,
-`\vref`, `\cref`/`\Cref` (one pin per item of the list) and `\crefrange`/`\Crefrange` (one pin per
-argument). An inline reference works the same as a pin.
+`\subref`, varioref's `\vref`, `\vpageref` and `\vrefrange`, and cleveref's `\cref`/`\Cref`,
+`\cpageref`/`\Cpageref` and `\labelcref` (one pin per item of the list) and
+`\crefrange`/`\Crefrange`/`\cpagerefrange` (one pin per argument). An inline reference works the
+same as a pin.
 
 | The pin points at | The label used |
 | --- | --- |
 | a code block — a figure, a table, an equation | its last `\label` (subfigures label each panel first and the whole figure last) |
 | an image rem | the label in the figure or table block under it |
 | a rem whose own text or maths holds a `\label{…}` | that label |
-| a heading | a `\label{…}` typed into its title; otherwise `\label{sec:<its title>}`, which Rem2Tex adds right after that heading's sectioning command — `\section{Sample Preparation}\label{sec:sample-preparation}` |
+| a heading | a `\label{…}` typed into its title; otherwise `\label{sec:<its title>}`, which Rem2Tex adds right after that heading's sectioning command — `\section{Sample Preparation}\label{sec:sample-preparation}`. Headings that share a title are numbered in outline order (`sec:results`, `sec:results-2`), and a label typed anywhere in the paper is never generated again, so a heading has the same label in every export |
 
 Only a pin that has the braces to itself — or, in a `\cref` list, its own item — is filled in.
 Anything else keeps the old behaviour, the pin is left out and the `\ref{}` stays empty, and the log
-says why: the pin points at a rem with no label, shares its braces with other text, or points at a
-Zotero item (cite that with `\cite{…}` instead). A heading gets a label only when a pin points at
+says why: the pin points at a rem with no label, shares its braces with other text, points at a
+Zotero item (cite that with `\cite{…}` instead), points at a rem that has since been deleted, or
+points at a heading LaTeX does not number — a starred `\section*{…}`, or one deeper than the
+document numbers (`\paragraph` in most classes; a `\setcounter{secnumdepth}{…}` in your preamble is
+honoured) — where `\ref` would print the number of something else. A heading gets a label only when a pin points at
 it, so the headings you never refer to export exactly as before.
 
 ### The reference check
@@ -214,7 +222,8 @@ in a `%` comment — and warns about:
   would print **??** in its place;
 - an empty reference, `\ref{}`;
 - a label defined twice;
-- a figure or table that nothing refers to (a figure counts as referenced when any of its labels is).
+- a figure or table that nothing refers to (a figure counts as referenced when any of its labels is,
+  and two figures in one code block count separately).
 
 These are warnings only. They appear at the top of the preview and in the log, the export always goes
 ahead, and the LaTeX is never changed. The log's Conversion section counts what it saw, e.g.
@@ -238,8 +247,11 @@ It converts the selection with the ordinary body rules — headings, escaping, c
    so on **in order of first appearance**; citing the same work again reuses its number. Typed
    wrappers keep their meaning: `\supercite{…}` becomes `\textsuperscript{[1]}`, `\cite[p. 3]{…}`
    becomes `[1, p. 3]`, `\citenum{…}` becomes a bare `1`, and `\nocite{…}` prints nothing but still
-   earns a bibliography entry. `\citeauthor{…}` and `\citeyear{…}` print a name or a year rather than
-   a label, so they are left exactly as you typed them — their work still gets an entry.
+   earns a bibliography entry (`\nocite{*}` takes no number at all). `\citeauthor{…}` and
+   `\citeyear{…}` print a name or a year rather than a label, and `\fullcite{…}` a whole entry, so
+   they are left exactly as you typed them — their work still gets an entry. `\textcite{…}` and
+   `\citet{…}` print the author AND the number, so they keep both: `As \textcite{smith2020} showed`
+   becomes `As \citeauthor{smith2020} [1] showed`.
 2. **A numbered bibliography is appended**, formatted like `biblatex`'s `numeric` style.
 
 ```

@@ -154,6 +154,8 @@ function Rem2TexConvertPopup() {
   const errors = preview?.issues.filter((i) => i.severity === 'error') ?? [];
   const warnings = preview?.issues.filter((i) => i.severity === 'warning') ?? [];
   const pinRows = preview?.pinRows ?? [];
+  // Pins, not rems: one rem can hold several (2026-11-25).
+  const pinCount = pinRows.reduce((sum, row) => sum + row.pins, 0);
   // `!preview?.blocked` alone is TRUE while the preview is still loading, which left the button
   // enabled and clicking it silently did nothing (`convert` returns early without a preview).
   const canExport = !busy && !!preview && !preview.blocked;
@@ -273,7 +275,7 @@ function Rem2TexConvertPopup() {
             style={{ marginTop: '0.2rem' }}
           />
           <span className="min-w-0">
-            Convert {pinRows.length} pin{pinRows.length === 1 ? '' : 's'} to citekeys{' '}
+            Convert {pinCount} pin{pinCount === 1 ? '' : 's'} to citekeys{' '}
             <span className="text-xs rn-clr-content-tertiary">
               — writes each citekey beside its pin, as a reference to the paper; the pin is kept
             </span>
